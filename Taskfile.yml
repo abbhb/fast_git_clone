@@ -31,6 +31,6 @@ tasks:
       - |
         unzip -p '{{.RELEASE_ZIP}}' task.json | grep -q '"language": "java"'
       - |
-        unzip -p '{{.RELEASE_ZIP}}' task.json | grep -q '"target": "\$bk_java_path -jar fast_git_clone.jar -Dfile.encoding=utf8"'
+        unzip -p '{{.RELEASE_ZIP}}' task.json | grep -q '"target": "\$bk_java_path -Dfile.encoding=UTF-8 -jar fast_git_clone.jar"'
       - unzip -p '{{.RELEASE_ZIP}}' fast_git_clone.jar >/dev/null
       - unzip -l '{{.RELEASE_ZIP}}'

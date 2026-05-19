@@ -24,4 +24,4 @@ task package
 GRADLE_IMAGE=gradle:8.10-jdk17 task package
 ```
 
-发布到插件市场时上传 `task package` 生成的 zip。`task.json` 的 `execution` 使用 Java 插件形式：`packagePath` 指向 zip 内的 fat jar，`target` 通过 `$bk_java_path -jar fast_git_clone.jar -Dfile.encoding=utf8` 执行。
+发布到插件市场时上传 `task package` 生成的 zip。`task.json` 的 `execution` 使用 Java 插件形式：`packagePath` 指向 zip 内的 fat jar，`target` 通过 `$bk_java_path -Dfile.encoding=UTF-8 -jar fast_git_clone.jar` 执行，确保 JVM 标准输出使用 UTF-8，避免中文日志显示为问号。

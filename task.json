@@ -3,7 +3,7 @@
   "execution": {
     "language": "java",
     "minimumVersion": "1.8",
-    "target": "$bk_java_path -jar fast_git_clone.jar -Dfile.encoding=utf8",
+    "target": "$bk_java_path -Dfile.encoding=UTF-8 -jar fast_git_clone.jar",
     "packagePath": "fast_git_clone.jar",
     "demands": []
   },
