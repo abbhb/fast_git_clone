@@ -1,0 +1,91 @@
+version: '3'
+
+vars:
+  PYTHON: '{{default "python3" .PYTHON}}'
+  ATOM_CODE:
+    sh: '{{.PYTHON}} -c "import json; print(json.load(open(\"task.json\"))[\"atomCode\"])"'
+  VERSION:
+    sh: '{{.PYTHON}} -c "print(open(\"version.txt\", encoding=\"utf-8\").read().strip())"'
+  RELEASE_ZIP: '../{{.ATOM_CODE}}.zip'
+  BUILD_VENV: '.task-venv'
+
+tasks:
+  default:
+    desc: Build the plugin upload zip
+    cmds:
+      - task: package
+
+  clean:
+    desc: Remove generated build artifacts
+    cmds:
+      - rm -rf build dist *.egg-info temp_zip
+      - rm -f '{{.RELEASE_ZIP}}'
+
+  clean-all:
+    desc: Remove generated build artifacts and local build environment
+    cmds:
+      - task: clean
+      - rm -rf '{{.BUILD_VENV}}'
+
+  prepare:
+    desc: Prepare the local Python build environment
+    cmds:
+      - |
+        if command -v uv >/dev/null 2>&1; then
+          exit 0
+        fi
+        if [ ! -x '{{.BUILD_VENV}}/bin/python' ]; then
+          {{.PYTHON}} -m venv '{{.BUILD_VENV}}'
+        fi
+        '{{.BUILD_VENV}}/bin/python' -m ensurepip --upgrade >/dev/null
+        '{{.BUILD_VENV}}/bin/python' -m pip install -q --upgrade setuptools
+
+  sdist:
+    desc: Build the Python source distribution
+    cmds:
+      - task: clean
+      - task: prepare
+      - '{{.PYTHON}} -m json.tool task.json >/dev/null'
+      - |
+        if command -v uv >/dev/null 2>&1; then
+          uv run --with setuptools python setup.py sdist
+        else
+          '{{.BUILD_VENV}}/bin/python' setup.py sdist
+        fi
+      - test -f 'dist/{{.ATOM_CODE}}-{{.VERSION}}.tar.gz'
+
+  package:
+    desc: Build the plugin market upload zip
+    cmds:
+      - task: clean
+      - task: prepare
+      - '{{.PYTHON}} -m json.tool task.json >/dev/null'
+      - |
+        if command -v uv >/dev/null 2>&1; then
+          uv run --with setuptools python setup.py sdist
+        else
+          '{{.BUILD_VENV}}/bin/python' setup.py sdist
+        fi
+      - test -f 'dist/{{.ATOM_CODE}}-{{.VERSION}}.tar.gz'
+      - mkdir -p temp_zip
+      - cp task.json 'temp_zip/task.json'
+      - cp 'dist/{{.ATOM_CODE}}-{{.VERSION}}.tar.gz' 'temp_zip/'
+      - find temp_zip -name '__pycache__' -type d -prune -exec rm -rf {} +
+      - find temp_zip -name '*.pyc' -type f -delete
+      - find temp_zip -name '.DS_Store' -type f -delete
+      - find temp_zip -name '._*' -type f -delete
+      - cd temp_zip && zip -q -r '../{{.RELEASE_ZIP}}' task.json '{{.ATOM_CODE}}-{{.VERSION}}.tar.gz'
+      - rm -rf temp_zip
+      - task: verify
+
+  verify:
+    desc: Verify task.json and upload zip contents
+    cmds:
+      - '{{.PYTHON}} -m json.tool task.json >/dev/null'
+      - unzip -p '{{.RELEASE_ZIP}}' task.json | {{.PYTHON}} -m json.tool >/dev/null
+      - unzip -p '{{.RELEASE_ZIP}}' task.json | {{.PYTHON}} -c 'import json, sys; data = json.load(sys.stdin); assert data["atomCode"] == "{{.ATOM_CODE}}"'
+      - unzip -p '{{.RELEASE_ZIP}}' task.json | {{.PYTHON}} -c 'import json, sys; data = json.load(sys.stdin); execution = data["execution"]; package = "{{.ATOM_CODE}}-{{.VERSION}}.tar.gz"; assert execution["language"] == "python"; assert execution["target"] == "{{.ATOM_CODE}}"; assert execution["packagePath"] == package; assert execution["demands"] == ["pip install " + package]'
+      - unzip -p '{{.RELEASE_ZIP}}' '{{.ATOM_CODE}}-{{.VERSION}}.tar.gz' >/dev/null
+      - tar -tf 'dist/{{.ATOM_CODE}}-{{.VERSION}}.tar.gz' | grep -q '{{.ATOM_CODE}}-{{.VERSION}}/fast_git_clone/command_line.py'
+      - tar -tf 'dist/{{.ATOM_CODE}}-{{.VERSION}}.tar.gz' | grep -q '{{.ATOM_CODE}}-{{.VERSION}}/python_atom_sdk/__init__.py'
+      - unzip -l '{{.RELEASE_ZIP}}'

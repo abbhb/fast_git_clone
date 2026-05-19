@@ -1,0 +1,2 @@
+[console_scripts]
+fast_git_clone = fast_git_clone.command_line:main
