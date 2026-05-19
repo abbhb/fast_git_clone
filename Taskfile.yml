@@ -20,14 +20,16 @@ tasks:
     desc: Build the plugin market upload zip with Dockerized Gradle
     cmds:
       - task: clean
-      - docker run --rm -v "$PWD:/workspace" -w /workspace '{{.GRADLE_IMAGE}}' gradle --no-daemon package
+      - mkdir -p .gradle
+      - docker run --rm -e GRADLE_USER_HOME=/workspace/.gradle -v "$PWD:/workspace" -w /workspace '{{.GRADLE_IMAGE}}' gradle --no-daemon package
       - cp build/out/fast_git_clone.zip '{{.RELEASE_ZIP}}'
       - task: verify
 
   verify:
     desc: Verify task.json and upload zip contents
     cmds:
-      - docker run --rm -v "$PWD:/workspace" -w /workspace '{{.GRADLE_IMAGE}}' gradle --no-daemon verifyPackage
+      - mkdir -p .gradle
+      - docker run --rm -e GRADLE_USER_HOME=/workspace/.gradle -v "$PWD:/workspace" -w /workspace '{{.GRADLE_IMAGE}}' gradle --no-daemon verifyPackage
       - |
         unzip -p '{{.RELEASE_ZIP}}' task.json | grep -q '"language": "java"'
       - |
