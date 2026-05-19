@@ -1,2 +1,0 @@
-fast_git_clone
-python_atom_sdk

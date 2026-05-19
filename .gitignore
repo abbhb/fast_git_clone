@@ -1,0 +1,8 @@
+.gradle/
+build/
+dist/
+*.egg-info/
+*.pyc
+__pycache__/
+.DS_Store
+../fast_git_clone.zip

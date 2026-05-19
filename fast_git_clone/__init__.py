@@ -1,1 +1,0 @@
-"""fast-git-clone plugin package."""

@@ -16,12 +16,12 @@
 task package
 ```
 
-执行后会在上级目录生成 `fast_git_clone.zip`，zip 根目录包含 `task.json` 和 `fast_git_clone-1.0.1.tar.gz`，可直接上传插件市场。
+执行后会在上级目录生成 `fast_git_clone.zip`，zip 根目录包含 `task.json` 和 `fast_git_clone.jar`，可直接上传插件市场。
 
-如需单独生成 Python 源码包，可执行：
+构建过程通过 Docker 运行 Gradle，默认镜像为 `gradle:8.8-jdk17`，避免污染本机 Java/Kotlin/Gradle 环境。如需切换镜像：
 
 ```bash
-python setup.py sdist
+GRADLE_IMAGE=gradle:8.10-jdk17 task package
 ```
 
-发布到插件市场时上传 `task package` 生成的 zip。`task.json` 的 `execution` 与蓝盾官方 Python 插件示例保持一致：配置 `packagePath` 指向 zip 内的源码包，并在 `demands` 中执行 `pip install fast_git_clone-1.0.1.tar.gz`。平台安装后会运行 console script 入口。
+发布到插件市场时上传 `task package` 生成的 zip。`task.json` 的 `execution` 使用 Java 插件形式：`packagePath` 指向 zip 内的 fat jar，`target` 通过 `$bk_java_path -jar fast_git_clone.jar -Dfile.encoding=utf8` 执行。

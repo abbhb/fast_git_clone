@@ -1,12 +1,11 @@
 {
   "atomCode": "fast_git_clone",
   "execution": {
-    "language": "python",
-    "target": "fast_git_clone",
-    "packagePath": "fast_git_clone-1.0.1.tar.gz",
-    "demands": [
-      "pip install fast_git_clone-1.0.1.tar.gz"
-    ]
+    "language": "java",
+    "minimumVersion": "1.8",
+    "target": "$bk_java_path -jar fast_git_clone.jar -Dfile.encoding=utf8",
+    "packagePath": "fast_git_clone.jar",
+    "demands": []
   },
   "input": {
     "GIT_USERNAME": {
