@@ -20,6 +20,8 @@ dependencies {
     implementation("com.tencent.devops.ci-plugins:java-plugin-sdk:1.1.9")
     implementation("org.bouncycastle:bcprov-jdk15to18:1.68")
     implementation(kotlin("stdlib-jdk8"))
+    testImplementation(kotlin("test-junit5"))
+    testRuntimeOnly("org.junit.jupiter:junit-jupiter-engine:5.10.2")
 }
 
 dependencyManagement {
@@ -30,6 +32,10 @@ dependencyManagement {
 
 tasks.withType<KotlinCompile>().configureEach {
     compilerOptions.jvmTarget.set(JvmTarget.JVM_1_8)
+}
+
+tasks.test {
+    useJUnitPlatform()
 }
 
 tasks.jar {

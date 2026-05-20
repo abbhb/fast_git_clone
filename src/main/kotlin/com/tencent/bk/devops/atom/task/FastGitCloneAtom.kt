@@ -13,6 +13,7 @@ import com.tencent.bk.devops.atom.spi.TaskAtom
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.math.BigInteger
+import java.net.URI
 import java.net.URLEncoder
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
@@ -26,6 +27,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.attribute.PosixFilePermission
 import java.util.Base64
+import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
 import javax.crypto.interfaces.DHPublicKey
@@ -246,23 +248,19 @@ class FastGitCloneRunner {
 
     private fun configureGitCredentials(gitUsername: String, gitToken: String, gitHost: String) {
         runCommand(listOf("git", "config", "--global", "credential.helper", "store"))
-        val credentialsPath = Paths.get(System.getProperty("user.home"), ".git-credentials")
-        val normalizedHost = gitHost.trim()
-            .removePrefix("https://")
-            .removePrefix("http://")
-            .trimEnd('/')
-        val credentialLine = "https://${urlEncode(gitUsername)}:${urlEncode(gitToken)}@$normalizedHost"
-        val keptLines = if (credentialsPath.exists()) {
-            credentialsPath.readText().lineSequence()
-                .map { it.trim() }
-                .filter { it.isNotBlank() && it.contains("://") }
-                .filter { !it.substringBefore('/').endsWith("@$normalizedHost") && !it.endsWith("@$normalizedHost") }
-                .toMutableList()
+        val credentialsPath = GitCredentialStore.credentialsPath()
+        val normalizedHost = GitCredentialStore.normalizeHost(gitHost)
+        val credentialLine = GitCredentialStore.credentialLine(gitUsername, gitToken, normalizedHost)
+        val credentialLines = if (credentialsPath.exists()) {
+            GitCredentialStore.updatedCredentialLines(
+                existingLines = credentialsPath.readText().lineSequence(),
+                normalizedHost = normalizedHost,
+                credentialLine = credentialLine,
+            )
         } else {
-            mutableListOf()
+            listOf(credentialLine)
         }
-        keptLines.add(credentialLine)
-        credentialsPath.writeText(keptLines.joinToString("\n") + "\n")
+        credentialsPath.writeText(credentialLines.joinToString("\n") + "\n")
         runCatching {
             Files.setPosixFilePermissions(
                 credentialsPath,
@@ -405,26 +403,11 @@ class FastGitCloneRunner {
     private fun ensureTrailingSlash(pathValue: String): String =
         if (pathValue.endsWith(java.io.File.separator)) pathValue else pathValue + java.io.File.separator
 
-    private fun urlEncode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
-
-    private fun hostFromUrl(repoUrl: String): String {
-        val trimmed = repoUrl.trim()
-        return when {
-            trimmed.startsWith("http://") || trimmed.startsWith("https://") ->
-                trimmed.substringAfter("://").substringBefore('/').substringBefore('@').let {
-                    if (it.contains(':')) it.substringAfter(':') else it
-                }
-            trimmed.contains('@') && trimmed.contains(':') ->
-                trimmed.substringAfter('@').substringBefore(':')
-            else -> paramHostFallback(trimmed)
-        }.ifBlank { throw PluginException("无法从仓库地址解析 Git 域名: ${maskUrl(repoUrl)}") }
+    private fun hostFromUrl(repoUrl: String): String = runCatching {
+        GitCredentialStore.normalizeHost(repoUrl)
+    }.getOrElse {
+        throw PluginException("无法从仓库地址解析 Git 域名: ${maskUrl(repoUrl)}")
     }
-
-    private fun paramHostFallback(value: String): String = value
-        .removePrefix("https://")
-        .removePrefix("http://")
-        .substringBefore('/')
-        .trimEnd('/')
 
     private fun maskUrl(repoUrl: String): String = repoUrl.replace(Regex("(https?://)[^/@:]+:[^/@]+@"), "$1***:***@")
 
@@ -433,6 +416,58 @@ class FastGitCloneRunner {
 
     private val repositoryApi = RepositoryApi()
     private val credentialApi = CredentialApiClient()
+}
+
+internal object GitCredentialStore {
+    fun credentialsPath(): Path {
+        val gitHome = System.getenv("HOME")?.takeIf { it.isNotBlank() } ?: System.getProperty("user.home")
+        return Paths.get(gitHome, ".git-credentials")
+    }
+
+    fun normalizeHost(value: String): String {
+        val trimmed = value.trim()
+        val host = when {
+            trimmed.startsWith("http://") || trimmed.startsWith("https://") ->
+                runCatching { hostWithPort(URI(trimmed)) }.getOrDefault("")
+            trimmed.contains('@') && trimmed.contains(':') ->
+                trimmed.substringAfter('@').substringBefore(':')
+            else -> trimmed
+                .removePrefix("https://")
+                .removePrefix("http://")
+                .substringBefore('/')
+                .trimEnd('/')
+        }.trim().lowercase(Locale.ROOT)
+        return host.ifBlank { throw PluginException("无法从 Git 地址解析域名") }
+    }
+
+    fun credentialLine(gitUsername: String, gitToken: String, normalizedHost: String): String =
+        "https://${urlEncode(gitUsername)}:${urlEncode(gitToken)}@$normalizedHost"
+
+    fun updatedCredentialLines(
+        existingLines: Sequence<String>,
+        normalizedHost: String,
+        credentialLine: String,
+    ): List<String> {
+        val keptLines = existingLines
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it.contains("://") }
+            .filterNot { credentialHostMatches(it, normalizedHost) }
+            .toMutableList()
+        keptLines.add(credentialLine)
+        return keptLines
+    }
+
+    fun credentialHostMatches(credentialLine: String, normalizedHost: String): Boolean {
+        val uri = runCatching { URI(credentialLine) }.getOrNull() ?: return false
+        return hostWithPort(uri) == normalizedHost.lowercase(Locale.ROOT)
+    }
+
+    private fun hostWithPort(uri: URI): String {
+        val host = uri.host.orEmpty().lowercase(Locale.ROOT)
+        return if (host.isNotBlank() && uri.port >= 0) "$host:${uri.port}" else host
+    }
+
+    private fun urlEncode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
 }
 
 private fun runCommand(

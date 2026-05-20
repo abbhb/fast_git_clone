@@ -1,5 +1,6 @@
 .gradle/
 build/
+/bin/main/
 dist/
 *.egg-info/
 *.pyc

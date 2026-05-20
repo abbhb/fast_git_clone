@@ -25,9 +25,16 @@ tasks:
       - cp build/out/fast_git_clone.zip '{{.RELEASE_ZIP}}'
       - task: verify
 
+  test:
+    desc: Run unit tests with Dockerized Gradle
+    cmds:
+      - mkdir -p .gradle
+      - docker run --rm -e GRADLE_USER_HOME=/workspace/.gradle -v "$PWD:/workspace" -w /workspace '{{.GRADLE_IMAGE}}' gradle --no-daemon test
+
   verify:
     desc: Verify task.json and upload zip contents
     cmds:
+      - task: test
       - mkdir -p .gradle
       - docker run --rm -e GRADLE_USER_HOME=/workspace/.gradle -v "$PWD:/workspace" -w /workspace '{{.GRADLE_IMAGE}}' gradle --no-daemon verifyPackage
       - |
