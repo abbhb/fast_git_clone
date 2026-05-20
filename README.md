@@ -9,7 +9,7 @@
 - 配置 Git credential store，并写入 `code.cwoa.net` 访问凭证。
 - 通过本地缓存目录复用 Git 仓库，减少重复全量 clone。
 - 按输入分支强制同步远端分支内容。
-- 使用 `rsync --delete` 将代码复制到目标目录，并排除 `.git`。
+- 使用 `rsync --delete` 将代码复制到目标目录，默认排除 `.git`，可通过 `EXCLUDE_GIT_DIR` 动态控制是否保留。
 - 当目标目录与默认工作目录相同时拒绝执行，避免清空流水线工作目录。
 
 ## 代码库与凭证

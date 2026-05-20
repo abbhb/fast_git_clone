@@ -57,6 +57,7 @@ class FastGitCloneRunner {
         val cacheDir = normalizePath(param.cacheDir.ifBlank { "\${{ci.workspace}}/git-cache/kingeye" }, param)
         val targetDir = normalizePath(param.targetDir.ifBlank { "\${{ci.workspace}}/\${{ci.build_num}}/kingeye_source" }, param)
         val defaultWorkDir = normalizePath(param.defaultWorkDir.ifBlank { "\${{ci.workspace}}" }, param)
+        val excludeGitDir = BooleanParam.parse(param.excludeGitDir, defaultValue = true, key = "EXCLUDE_GIT_DIR")
 
         validateTools()
         validatePaths(cacheDir, targetDir, defaultWorkDir)
@@ -69,6 +70,7 @@ class FastGitCloneRunner {
         }
         Log.info("缓存目录: $cacheDir")
         Log.info("目标目录: $targetDir")
+            Log.info("同步到目标目录时${if (excludeGitDir) "排除" else "保留"} .git 目录")
 
         val gitEnv = configureGitAuth(gitSource)
         try {
@@ -77,7 +79,7 @@ class FastGitCloneRunner {
             gitSource.auth.cleanup()
         }
         val commitId = getCommitId(cacheDir)
-        rsyncToTarget(cacheDir, targetDir)
+        rsyncToTarget(cacheDir, targetDir, excludeGitDir)
 
         Log.info("分支: $targetBranch")
         Log.info("Commit: $commitId")
@@ -385,23 +387,11 @@ class FastGitCloneRunner {
     private fun getCommitId(cacheDir: String): String =
         runCommand(listOf("git", "rev-parse", "HEAD"), cwd = Paths.get(cacheDir), captureOutput = true).stdout.trim()
 
-    private fun rsyncToTarget(cacheDir: String, targetDir: String) {
+    private fun rsyncToTarget(cacheDir: String, targetDir: String, excludeGitDir: Boolean) {
         Log.info("同步代码到工作目录...")
         Paths.get(targetDir).createDirectories()
-        runCommand(
-            listOf(
-                "rsync",
-                "-a",
-                "--delete",
-                "--exclude=.git",
-                ensureTrailingSlash(cacheDir),
-                ensureTrailingSlash(targetDir),
-            ),
-        )
+        runCommand(RsyncCommand.build(cacheDir, targetDir, excludeGitDir))
     }
-
-    private fun ensureTrailingSlash(pathValue: String): String =
-        if (pathValue.endsWith(java.io.File.separator)) pathValue else pathValue + java.io.File.separator
 
     private fun hostFromUrl(repoUrl: String): String = runCatching {
         GitCredentialStore.normalizeHost(repoUrl)
@@ -468,6 +458,35 @@ internal object GitCredentialStore {
     }
 
     private fun urlEncode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
+}
+
+internal object BooleanParam {
+    fun parse(value: String, defaultValue: Boolean, key: String): Boolean {
+        val normalizedValue = value.trim().lowercase(Locale.ROOT)
+        if (normalizedValue.isEmpty()) {
+            return defaultValue
+        }
+        return when (normalizedValue) {
+            "true", "1", "yes", "y", "on" -> true
+            "false", "0", "no", "n", "off" -> false
+            else -> throw PluginException("$key 只能填写 true/false、1/0、yes/no 或 on/off，当前值: $value")
+        }
+    }
+}
+
+internal object RsyncCommand {
+    fun build(cacheDir: String, targetDir: String, excludeGitDir: Boolean): List<String> {
+        val command = mutableListOf("rsync", "-a", "--delete")
+        if (excludeGitDir) {
+            command.add("--exclude=.git")
+        }
+        command.add(ensureTrailingSlash(cacheDir))
+        command.add(ensureTrailingSlash(targetDir))
+        return command
+    }
+
+    private fun ensureTrailingSlash(pathValue: String): String =
+        if (pathValue.endsWith(java.io.File.separator)) pathValue else pathValue + java.io.File.separator
 }
 
 private fun runCommand(

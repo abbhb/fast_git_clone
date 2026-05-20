@@ -195,6 +195,17 @@
       "hidden": false,
       "isSensitive": false
     },
+    "EXCLUDE_GIT_DIR": {
+      "label": "排除 .git 目录",
+      "default": "true",
+      "placeholder": "true 或 ${{variables.excludeGitDir}}",
+      "type": "vuex-input",
+      "desc": "控制 rsync 是否添加 --exclude=.git；支持 true/false、1/0、yes/no、on/off，可填写流水线变量动态控制",
+      "required": false,
+      "disabled": false,
+      "hidden": false,
+      "isSensitive": false
+    },
     "DEFAULT_WORK_DIR": {
       "label": "默认工作目录",
       "default": "${{ci.workspace}}",

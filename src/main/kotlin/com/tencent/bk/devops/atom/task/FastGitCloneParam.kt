@@ -34,6 +34,9 @@ class FastGitCloneParam : AtomBaseParam() {
     @JsonProperty("TARGET_DIR")
     var targetDir: String = ""
 
+    @JsonProperty("EXCLUDE_GIT_DIR")
+    var excludeGitDir: String = "true"
+
     @JsonProperty("DEFAULT_WORK_DIR")
     var defaultWorkDir: String = ""
 }
