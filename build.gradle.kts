@@ -18,6 +18,7 @@ java {
 
 dependencies {
     implementation("com.tencent.devops.ci-plugins:java-plugin-sdk:1.1.9")
+    implementation("org.bouncycastle:bcprov-jdk15to18:1.68")
     implementation(kotlin("stdlib-jdk8"))
 }
 

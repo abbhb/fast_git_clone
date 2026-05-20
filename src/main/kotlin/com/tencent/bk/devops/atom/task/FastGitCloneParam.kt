@@ -4,6 +4,15 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.tencent.bk.devops.atom.pojo.AtomBaseParam
 
 class FastGitCloneParam : AtomBaseParam() {
+    @JsonProperty("repositoryType")
+    var repositoryType: String = "URL"
+
+    @JsonProperty("repositoryHashId")
+    var repositoryHashId: String = ""
+
+    @JsonProperty("repositoryName")
+    var repositoryName: String = ""
+
     @JsonProperty("GIT_USERNAME")
     var gitUsername: String = ""
 

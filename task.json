@@ -8,16 +8,99 @@
     "demands": []
   },
   "input": {
+    "repositoryType": {
+      "label": "代码库来源",
+      "default": "URL",
+      "desc": "选择蓝盾代码库时自动使用代码库绑定的授权信息；自定义 URL 时使用下方用户名和 Token",
+      "type": "enum-input",
+      "required": true,
+      "disabled": false,
+      "hidden": false,
+      "isSensitive": false,
+      "list": [
+        {
+          "label": "按蓝盾代码库选择",
+          "value": "ID"
+        },
+        {
+          "label": "按蓝盾代码库别名输入",
+          "value": "NAME"
+        },
+        {
+          "label": "按自定义仓库 URL 输入",
+          "value": "URL"
+        }
+      ]
+    },
+    "repositoryHashId": {
+      "label": "蓝盾代码库",
+      "default": "",
+      "placeholder": "请选择代码库名称",
+      "type": "selector",
+      "desc": "仅展示当前用户有 USE 权限的蓝盾代码库",
+      "required": false,
+      "disabled": false,
+      "hidden": false,
+      "isSensitive": false,
+      "optionsConf": {
+        "searchable": true,
+        "multiple": false,
+        "url": "/repository/api/user/repositories/{projectId}/hasPermissionList?permission=USE&page=1&pageSize=5000",
+        "paramId": "repositoryHashId",
+        "paramName": "aliasName",
+        "itemTargetUrl": "/codelib/{projectId}/",
+        "itemText": "关联代码库",
+        "hasAddItem": true
+      },
+      "rely": {
+        "operation": "AND",
+        "expression": [
+          {
+            "key": "repositoryType",
+            "value": "ID"
+          }
+        ]
+      }
+    },
+    "repositoryName": {
+      "label": "蓝盾代码库别名",
+      "default": "",
+      "placeholder": "请输入代码库别名",
+      "type": "vuex-input",
+      "desc": "按蓝盾代码库别名查询代码库详情，并自动使用其绑定授权",
+      "required": false,
+      "disabled": false,
+      "hidden": false,
+      "isSensitive": false,
+      "rely": {
+        "operation": "AND",
+        "expression": [
+          {
+            "key": "repositoryType",
+            "value": "NAME"
+          }
+        ]
+      }
+    },
     "GIT_USERNAME": {
       "label": "Git 用户名",
       "default": "",
       "placeholder": "请输入 Git 用户名",
       "type": "vuex-input",
       "desc": "用于写入 Git credential store 的用户名",
-      "required": true,
+      "required": false,
       "disabled": false,
       "hidden": false,
-      "isSensitive": false
+      "isSensitive": false,
+      "rely": {
+        "operation": "AND",
+        "expression": [
+          {
+            "key": "repositoryType",
+            "value": "URL"
+          }
+        ]
+      }
     },
     "GIT_TOKEN": {
       "label": "Git Token",
@@ -25,10 +108,19 @@
       "placeholder": "请输入 Git Token 或密码",
       "type": "vuex-input",
       "desc": "用于写入 Git credential store 的访问凭证",
-      "required": true,
+      "required": false,
       "disabled": false,
       "hidden": false,
-      "isSensitive": true
+      "isSensitive": true,
+      "rely": {
+        "operation": "AND",
+        "expression": [
+          {
+            "key": "repositoryType",
+            "value": "URL"
+          }
+        ]
+      }
     },
     "GIT_HOST": {
       "label": "Git 域名",
@@ -36,10 +128,19 @@
       "placeholder": "code.cwoa.net",
       "type": "vuex-input",
       "desc": "写入 ~/.git-credentials 的 Git 域名",
-      "required": true,
+      "required": false,
       "disabled": false,
       "hidden": false,
-      "isSensitive": false
+      "isSensitive": false,
+      "rely": {
+        "operation": "AND",
+        "expression": [
+          {
+            "key": "repositoryType",
+            "value": "URL"
+          }
+        ]
+      }
     },
     "KINGEYE_GIT_REPO": {
       "label": "Git 仓库地址",
@@ -47,10 +148,19 @@
       "placeholder": "https://code.cwoa.net/group/repo.git",
       "type": "vuex-input",
       "desc": "需要拉取的 Git 仓库 HTTPS 地址",
-      "required": true,
+      "required": false,
       "disabled": false,
       "hidden": false,
-      "isSensitive": false
+      "isSensitive": false,
+      "rely": {
+        "operation": "AND",
+        "expression": [
+          {
+            "key": "repositoryType",
+            "value": "URL"
+          }
+        ]
+      }
     },
     "BRANCH": {
       "label": "仓库分支",
