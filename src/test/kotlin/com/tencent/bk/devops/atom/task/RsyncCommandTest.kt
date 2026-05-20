@@ -37,6 +37,17 @@ class RsyncCommandTest {
     }
 
     @Test
+    fun `parses negated dynamic boolean input values`() {
+        assertFalse(BooleanParam.parse("!true", defaultValue = true, key = "EXCLUDE_GIT_DIR"))
+        assertFalse(BooleanParam.parse("! yes", defaultValue = true, key = "EXCLUDE_GIT_DIR"))
+        assertFalse(BooleanParam.parse("!1", defaultValue = true, key = "EXCLUDE_GIT_DIR"))
+
+        assertTrue(BooleanParam.parse("!false", defaultValue = false, key = "EXCLUDE_GIT_DIR"))
+        assertTrue(BooleanParam.parse("! no", defaultValue = false, key = "EXCLUDE_GIT_DIR"))
+        assertTrue(BooleanParam.parse("!0", defaultValue = false, key = "EXCLUDE_GIT_DIR"))
+    }
+
+    @Test
     fun `blank dynamic boolean input uses default value`() {
         assertTrue(BooleanParam.parse("", defaultValue = true, key = "EXCLUDE_GIT_DIR"))
         assertFalse(BooleanParam.parse(" ", defaultValue = false, key = "EXCLUDE_GIT_DIR"))

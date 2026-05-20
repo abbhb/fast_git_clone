@@ -466,11 +466,14 @@ internal object BooleanParam {
         if (normalizedValue.isEmpty()) {
             return defaultValue
         }
-        return when (normalizedValue) {
+        val negated = normalizedValue.startsWith("!")
+        val booleanValue = if (negated) normalizedValue.removePrefix("!").trim() else normalizedValue
+        val parsedValue = when (booleanValue) {
             "true", "1", "yes", "y", "on" -> true
             "false", "0", "no", "n", "off" -> false
-            else -> throw PluginException("$key 只能填写 true/false、1/0、yes/no 或 on/off，当前值: $value")
+            else -> throw PluginException("$key 只能填写 true/false、1/0、yes/no 或 on/off，支持在前面加 ! 取反，当前值: $value")
         }
+        return if (negated) !parsedValue else parsedValue
     }
 }
 

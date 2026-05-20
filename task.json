@@ -198,9 +198,9 @@
     "EXCLUDE_GIT_DIR": {
       "label": "排除 .git 目录",
       "default": "true",
-      "placeholder": "true 或 ${{variables.excludeGitDir}}",
+      "placeholder": "true、false 或 !${{variables.BUILD_REPORT}}",
       "type": "vuex-input",
-      "desc": "控制 rsync 是否添加 --exclude=.git；支持 true/false、1/0、yes/no、on/off，可填写流水线变量动态控制",
+      "desc": "控制 rsync 是否添加 --exclude=.git；支持 true/false、1/0、yes/no、on/off，可填写流水线变量，也可在前面加 ! 取反",
       "required": false,
       "disabled": false,
       "hidden": false,
