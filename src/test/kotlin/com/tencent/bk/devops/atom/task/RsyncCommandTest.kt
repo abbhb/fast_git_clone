@@ -59,4 +59,33 @@ class RsyncCommandTest {
             BooleanParam.parse("maybe", defaultValue = true, key = "EXCLUDE_GIT_DIR")
         }
     }
+
+    @Test
+    fun `builds source material repository name from url`() {
+        assertEquals("rd-fy22-canway-kingeye/kingeye", repositoryNameFromUrl("https://code.cwoa.net/rd-fy22-canway-kingeye/kingeye.git"))
+        assertEquals("group/repo", repositoryNameFromUrl("git@github.com:group/repo.git"))
+    }
+
+    @Test
+    fun `builds source material commit urls`() {
+        assertEquals(
+            "https://code.cwoa.net/group/repo/-/commit/60466559",
+            buildCommitUrl("https://code.cwoa.net/group/repo.git", "60466559", "CODE_GITLAB"),
+        )
+        assertEquals(
+            "https://github.com/group/repo/commit/60466559",
+            buildCommitUrl("git@github.com:group/repo.git", "60466559", "GITHUB"),
+        )
+    }
+
+    @Test
+    fun `normalizes source material scm types`() {
+        assertEquals("GITHUB", inferScmType("https://github.com/group/repo.git"))
+        assertEquals("CODE_TGIT", inferScmType("git@git.code.tencent.com:group/repo.git"))
+        assertEquals("CODE_GITLAB", inferScmType("https://code.cwoa.net/group/repo.git"))
+
+        assertEquals("SCM_GIT", normalizeScmType("SCM_GIT"))
+        assertEquals("CODE_GIT", normalizeScmType("CODE_GIT"))
+        assertEquals("CODE_GITLAB", normalizeScmType("com.tencent.CodeGitlabRepository"))
+    }
 }

@@ -493,7 +493,12 @@ internal class SystemGitCredentialBackend : GitCredentialBackend {
         credential: StoredGitCredential? = null,
     ): GitCredentialProcessResult {
         val input = gitCredentialInput(targetUri, credential)
-        val processBuilder = ProcessBuilder(listOf("git") + helperArgs + action)
+        val command = listOf("git") + helperArgs + action
+        val handleErrStream = handleErrStream(helperArgs)
+        val processBuilder = ProcessBuilder(command)
+        if (!handleErrStream) {
+            processBuilder.redirectError(ProcessBuilder.Redirect.DISCARD)
+        }
         if (System.getenv("HOME").isNullOrBlank()) {
             processBuilder.environment()["HOME"] = userHome()
         }
@@ -501,18 +506,31 @@ internal class SystemGitCredentialBackend : GitCredentialBackend {
         process.outputStream.use { it.write(input.toByteArray(StandardCharsets.UTF_8)) }
         val stdout = ByteArrayOutputStream()
         val stderr = ByteArrayOutputStream()
+        if (!process.waitFor(GIT_CREDENTIAL_HELPER_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            throw PluginException("Git credential helper 执行超时: ${command.joinToString(" ")}")
+        }
         process.inputStream.copyTo(stdout)
-        process.errorStream.copyTo(stderr)
+        if (handleErrStream) {
+            process.errorStream.copyTo(stderr)
+        }
         val exitCode = process.waitFor()
         if (exitCode != 0 && action != "get") {
-            throw PluginException(
-                "Git credential helper 执行失败: ${maskMessage(stderr.toString(StandardCharsets.UTF_8.name()).trim())}",
-            )
+            val detail = stderr.toString(StandardCharsets.UTF_8.name()).trim()
+                .takeIf { it.isNotBlank() }
+                ?.let { ": ${maskMessage(it)}" }
+                .orEmpty()
+            throw PluginException("Git credential helper 执行失败: ${command.joinToString(" ")}$detail")
         }
         return GitCredentialProcessResult(
             exitCode = exitCode,
             stdout = stdout.toString(StandardCharsets.UTF_8.name()),
         )
+    }
+
+    private fun handleErrStream(helperArgs: List<String>): Boolean {
+        // 与 checkout 保持一致：低版本 git credential-cache 的错误流可能不关闭，捕获 stderr 会导致进程挂起。
+        return helperArgs.firstOrNull() != "credential-cache"
     }
 
     private fun gitCredentialInput(targetUri: URI, credential: StoredGitCredential?): String {
@@ -587,3 +605,5 @@ internal fun tightenExistingCredentialCacheDirectory(directory: Path) {
 private fun isMac(): Boolean = System.getProperty("os.name").lowercase(Locale.ROOT).contains("mac")
 
 private fun isWindows(): Boolean = System.getProperty("os.name").lowercase(Locale.ROOT).contains("win")
+
+private const val GIT_CREDENTIAL_HELPER_TIMEOUT_SECONDS = 30L

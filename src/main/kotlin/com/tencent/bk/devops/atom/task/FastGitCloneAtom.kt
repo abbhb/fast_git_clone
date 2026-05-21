@@ -94,7 +94,9 @@ class FastGitCloneRunner {
             gitSource.auth.cleanup()
         }
         val commitId = getCommitId(cacheDir)
+        val commitMessage = getCommitMessage(cacheDir)
         rsyncToTarget(cacheDir, targetDir, excludeGitDir)
+        reportSourceMaterial(gitSource, targetBranch, commitId, commitMessage)
 
         Log.info("分支: $targetBranch")
         Log.info("Commit: $commitId")
@@ -113,12 +115,13 @@ class FastGitCloneRunner {
             RepositoryType.URL.name -> GitSource(
                 repositoryType = repositoryType,
                 repositoryUrl = requireValue(param.kingeyeGitRepo, "KINGEYE_GIT_REPO"),
-                aliasName = "",
+                aliasName = repositoryNameFromUrl(param.kingeyeGitRepo),
                 auth = GitAuth.Http(
                     username = requireValue(param.gitUsername, "GIT_USERNAME"),
                     password = requireValue(param.gitToken, "GIT_TOKEN"),
                 ),
                 gitHost = requireValue(param.gitHost, "GIT_HOST"),
+                scmType = inferScmType(param.kingeyeGitRepo),
             )
             RepositoryType.ID.name, RepositoryType.NAME.name -> {
                 val repositoryId = when (repositoryType) {
@@ -133,6 +136,7 @@ class FastGitCloneRunner {
                     aliasName = repository.aliasName,
                     auth = auth,
                     gitHost = hostFromUrl(repository.url),
+                    scmType = normalizeScmType(repository.scmType.ifBlank { repository.scmCode }),
                 )
             }
             else -> throw PluginException("不支持的代码库来源: $repositoryType")
@@ -411,6 +415,37 @@ class FastGitCloneRunner {
     private fun getCommitId(cacheDir: String): String =
         runCommand(listOf("git", "rev-parse", "HEAD"), cwd = Paths.get(cacheDir), captureOutput = true).stdout.trim()
 
+    private fun getCommitMessage(cacheDir: String): String =
+        runCommand(
+            listOf("git", "log", "-1", "--pretty=%B"),
+            cwd = Paths.get(cacheDir),
+            captureOutput = true,
+        ).stdout.trim()
+
+    private fun reportSourceMaterial(
+        gitSource: GitSource,
+        targetBranch: String,
+        commitId: String,
+        commitMessage: String,
+    ) {
+        val material = SourceMaterialPayload(
+            aliasName = gitSource.aliasName.ifBlank { repositoryNameFromUrl(gitSource.repositoryUrl) },
+            url = buildCommitUrl(gitSource.repositoryUrl, commitId, gitSource.scmType),
+            branchName = targetBranch,
+            newCommitId = commitId,
+            newCommitComment = commitMessage,
+            commitTimes = 1,
+            scmType = gitSource.scmType,
+            mainRepo = true,
+        )
+        runCatching {
+            sourceMaterialApi.saveBuildMaterial(listOf(material))
+            Log.info("源材料上报成功: ${material.aliasName} $targetBranch $commitId")
+        }.onFailure { error ->
+            Log.warning("源材料上报失败，不影响代码同步: ${error.message}")
+        }
+    }
+
     private fun rsyncToTarget(cacheDir: String, targetDir: String, excludeGitDir: Boolean) {
         Log.info("同步代码到工作目录...")
         Paths.get(targetDir).createDirectories()
@@ -430,6 +465,7 @@ class FastGitCloneRunner {
 
     private val repositoryApi = RepositoryApi()
     private val credentialApi = CredentialApiClient()
+    private val sourceMaterialApi = SourceMaterialApi()
 }
 
 internal object BooleanParam {
@@ -529,6 +565,18 @@ private data class GitSource(
     val aliasName: String,
     val auth: GitAuth,
     val gitHost: String,
+    val scmType: String,
+)
+
+internal data class SourceMaterialPayload(
+    val aliasName: String,
+    val url: String,
+    val branchName: String,
+    val newCommitId: String,
+    val newCommitComment: String,
+    val commitTimes: Int,
+    val scmType: String,
+    val mainRepo: Boolean,
 )
 
 private sealed class GitAuth {
@@ -563,6 +611,14 @@ private enum class RepositoryType {
     ID,
     NAME,
     URL,
+}
+
+private object ScmTypes {
+    const val CODE_GIT = "CODE_GIT"
+    const val CODE_GITLAB = "CODE_GITLAB"
+    const val GITHUB = "GITHUB"
+    const val CODE_TGIT = "CODE_TGIT"
+    const val SCM_GIT = "SCM_GIT"
 }
 
 private class RepositoryApi : BaseApi() {
@@ -691,6 +747,13 @@ private class RepositoryApi : BaseApi() {
     }
 }
 
+private class SourceMaterialApi : BaseApi() {
+    fun saveBuildMaterial(materialList: List<SourceMaterialPayload>) {
+        val path = "/process/api/build/repository/saveBuildMaterial"
+        request(buildPost(path, getJsonRequest(materialList), mutableMapOf()), "源材料上报失败")
+    }
+}
+
 private class CredentialApiClient : BaseApi() {
     fun getCredential(credentialId: String): CredentialInfo {
         val keyPair = DH.initKey()
@@ -778,6 +841,46 @@ private fun JsonNode.firstText(vararg fields: String): String =
         .map { path(it).asText("").trim() }
         .firstOrNull { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
         .orEmpty()
+
+internal fun repositoryNameFromUrl(repositoryUrl: String): String {
+    val trimmedUrl = repositoryUrl.trim()
+    val uri = runCatching { java.net.URI(trimmedUrl) }.getOrNull()
+    val path = uri?.path?.takeIf { it.isNotBlank() } ?: trimmedUrl.substringAfter(':', trimmedUrl)
+    return path.trim('/')
+        .removeSuffix(".git")
+        .ifBlank { trimmedUrl.removeSuffix(".git") }
+}
+
+internal fun buildCommitUrl(repositoryUrl: String, commitId: String, scmType: String): String {
+    val normalizedUrl = repositoryUrl.trim()
+        .replace(Regex("^git@([^:]+):(.+)$"), "https://$1/$2")
+        .removeSuffix(".git")
+    val separator = if (scmType == ScmTypes.CODE_GITLAB) "/-" else ""
+    return "$normalizedUrl$separator/commit/$commitId"
+}
+
+internal fun inferScmType(repositoryUrl: String): String {
+    val hostName = runCatching { java.net.URI(repositoryUrl.trim()).host.orEmpty() }.getOrDefault("")
+        .ifBlank { Regex("^git@([^:]+):").find(repositoryUrl.trim())?.groupValues?.getOrNull(1).orEmpty() }
+    return when {
+        hostName.contains("github.com", ignoreCase = true) -> ScmTypes.GITHUB
+        hostName.contains("git.tencent.com", ignoreCase = true) ||
+            hostName.contains("git.code.tencent.com", ignoreCase = true) -> ScmTypes.CODE_TGIT
+        else -> ScmTypes.CODE_GITLAB
+    }
+}
+
+internal fun normalizeScmType(rawScmType: String): String {
+    val normalized = rawScmType.substringAfterLast('.').uppercase(Locale.ROOT)
+    return when {
+        normalized.contains("GITHUB") -> ScmTypes.GITHUB
+        normalized.contains("TGIT") -> ScmTypes.CODE_TGIT
+        normalized.contains("GITLAB") -> ScmTypes.CODE_GITLAB
+        normalized.contains("SCM") -> ScmTypes.SCM_GIT
+        normalized.contains("GIT") -> ScmTypes.CODE_GIT
+        else -> ScmTypes.CODE_GITLAB
+    }
+}
 
 private fun Map<String, String>.pick(vararg keys: String): String? =
     keys.asSequence()
