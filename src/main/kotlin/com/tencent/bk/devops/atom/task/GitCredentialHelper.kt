@@ -497,7 +497,7 @@ internal class SystemGitCredentialBackend : GitCredentialBackend {
         val handleErrStream = handleErrStream(helperArgs)
         val processBuilder = ProcessBuilder(command)
         if (!handleErrStream) {
-            processBuilder.redirectError(ProcessBuilder.Redirect.DISCARD)
+            processBuilder.redirectError(discardProcessOutput())
         }
         if (System.getenv("HOME").isNullOrBlank()) {
             processBuilder.environment()["HOME"] = userHome()
@@ -568,7 +568,7 @@ internal class SystemGitCredentialBackend : GitCredentialBackend {
     private fun helperExists(helperName: String): Boolean {
         val stderr = ByteArrayOutputStream()
         val process = ProcessBuilder("git", helperName, "get")
-            .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+            .redirectOutput(discardProcessOutput())
             .redirectError(ProcessBuilder.Redirect.PIPE)
             .start()
         process.outputStream.use { it.write("\n".toByteArray(StandardCharsets.UTF_8)) }
@@ -581,6 +581,10 @@ internal class SystemGitCredentialBackend : GitCredentialBackend {
 }
 
 private data class GitCredentialProcessResult(val exitCode: Int, val stdout: String)
+
+internal fun discardProcessOutput(): ProcessBuilder.Redirect = ProcessBuilder.Redirect.to(nullDevicePath().toFile())
+
+private fun nullDevicePath(): Path = if (isWindows()) Paths.get("NUL") else Paths.get("/dev/null")
 
 private fun userHome(): String = System.getenv("HOME")?.takeIf { it.isNotBlank() } ?: System.getProperty("user.home")
 

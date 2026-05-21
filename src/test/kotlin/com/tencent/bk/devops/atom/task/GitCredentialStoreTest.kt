@@ -77,6 +77,14 @@ class GitCredentialHelperTest {
     }
 
     @Test
+    fun `uses Java 8 compatible process output discard`() {
+        val redirect = discardProcessOutput()
+
+        assertEquals(ProcessBuilder.Redirect.Type.WRITE, redirect.type())
+        assertTrue(redirect.file().path == "/dev/null" || redirect.file().path == "NUL")
+    }
+
+    @Test
     fun `computes git versions like checkout core`() {
         assertEquals(2300201L, GitVersionSupport.computeGitVersion("git version 2.30.2.windows.1"))
         assertEquals(2300155L, GitVersionSupport.computeGitVersion("git version 2.30.0.155.g66e871b"))
