@@ -30,7 +30,11 @@ class GitCredentialHelperTest {
             jarPath = Paths.get("/tmp/fast git clone.jar"),
             javaPath = Paths.get("/usr/bin/java"),
         )
-        val environment = GitCredentialConfig.environment(helperCommand)
+        val environment = GitCredentialConfig.environment(
+            helperCommand = helperCommand,
+            taskId = "task-1",
+            supportsEmptyCredentialHelper = true,
+        )
 
         assertEquals("3", environment["GIT_CONFIG_COUNT"])
         assertEquals("credential.helper", environment["GIT_CONFIG_KEY_0"])
@@ -39,6 +43,46 @@ class GitCredentialHelperTest {
         assertEquals("credential.useHttpPath", environment["GIT_CONFIG_KEY_2"])
         assertFalse(helperCommand.contains("token"))
         assertFalse(helperCommand.contains("password"))
+    }
+
+    @Test
+    fun `global fast helper is active only after the last reset helper`() {
+        val fastHelper = "!/usr/bin/java -cp /tmp/fast_git_clone.jar ${FastGitCredentialHelper::class.java.name}"
+
+        assertFalse(GitCredentialConfig.hasActiveFastHelper(listOf("store", fastHelper, ""), true))
+        assertTrue(GitCredentialConfig.hasActiveFastHelper(listOf("store", "", fastHelper), true))
+        assertTrue(GitCredentialConfig.hasActiveFastHelper(listOf("store", fastHelper), false))
+        assertFalse(GitCredentialConfig.hasActiveFastHelper(listOf("store", "cache"), false))
+    }
+
+    @Test
+    fun `uses credential username fallback when empty helper is not supported`() {
+        val helperCommand = GitCredentialConfig.helperCommand(
+            taskId = "task-1",
+            jarPath = Paths.get("/tmp/fast git clone.jar"),
+            javaPath = Paths.get("/usr/bin/java"),
+        )
+        val environment = GitCredentialConfig.environment(
+            helperCommand = helperCommand,
+            taskId = "task-1",
+            supportsEmptyCredentialHelper = false,
+        )
+
+        assertEquals("3", environment["GIT_CONFIG_COUNT"])
+        assertEquals("credential.username", environment["GIT_CONFIG_KEY_0"])
+        assertEquals("task-1", environment["GIT_CONFIG_VALUE_0"])
+        assertEquals("credential.helper", environment["GIT_CONFIG_KEY_1"])
+        assertEquals(helperCommand, environment["GIT_CONFIG_VALUE_1"])
+        assertEquals("credential.useHttpPath", environment["GIT_CONFIG_KEY_2"])
+    }
+
+    @Test
+    fun `computes git versions like checkout core`() {
+        assertEquals(2300201L, GitVersionSupport.computeGitVersion("git version 2.30.2.windows.1"))
+        assertEquals(2300155L, GitVersionSupport.computeGitVersion("git version 2.30.0.155.g66e871b"))
+        assertEquals(2190100L, GitVersionSupport.computeGitVersion("git version 2.19.1"))
+        assertEquals(2300100L, GitVersionSupport.computeGitVersion("git version 2.30.1 (Apple Git-130)"))
+        assertEquals(2090000L, GitVersionSupport.computeVersionFromBits(2, 9, 0, 0))
     }
 
     @Test

@@ -87,7 +87,7 @@ internal class GitCredentialSession private constructor(
         Log.info("Git credential helper 已写入安全凭证后端: ${request.host}")
     }
 
-    fun gitEnvironment(): Map<String, String> = GitCredentialConfig.environment(helperCommand)
+    fun gitEnvironment(): Map<String, String> = GitCredentialConfig.environment(helperCommand, taskId)
 
     fun configureLocalRepository(repoDir: Path) {
         if (!repoDir.resolve(".git").isDirectory()) {
@@ -99,7 +99,11 @@ internal class GitCredentialSession private constructor(
             check = false,
             captureOutput = true,
         )
-        runCommand(listOf("git", "config", "--local", "--add", "credential.helper", ""), cwd = repoDir)
+        if (GitVersionSupport.supportsEmptyCredentialHelper()) {
+            runCommand(listOf("git", "config", "--local", "--add", "credential.helper", ""), cwd = repoDir)
+        } else {
+            runCommand(listOf("git", "config", "--local", "credential.username", taskId), cwd = repoDir)
+        }
         runCommand(listOf("git", "config", "--local", "--add", "credential.helper", helperCommand), cwd = repoDir)
         runCommand(listOf("git", "config", "--local", "credential.useHttpPath", "false"), cwd = repoDir)
         Log.info("Git credential helper 已配置到本地仓库")
@@ -161,12 +165,16 @@ internal object GitCredentialConfig {
     }
 
     fun configureGlobalHelper(helperCommand: String) {
+        val supportsEmptyCredentialHelper = GitVersionSupport.supportsEmptyCredentialHelper()
         val configuredHelpers = runCommand(
             listOf("git", "config", "--global", "--get-all", "credential.helper"),
             check = false,
             captureOutput = true,
-        ).stdout.lineSequence().map { it.trim() }.filter { it.isNotBlank() }.toList()
-        if (configuredHelpers.none { it.contains(FastGitCredentialHelper::class.java.name) }) {
+        ).stdout.lineSequence().map { it.trim() }.toList()
+        if (!hasActiveFastHelper(configuredHelpers, supportsEmptyCredentialHelper)) {
+            if (supportsEmptyCredentialHelper) {
+                runCommand(listOf("git", "config", "--global", "--add", "credential.helper", ""))
+            }
             runCommand(listOf("git", "config", "--global", "--add", "credential.helper", helperCommand))
             Log.info("Git credential helper 已配置到全局，用于当前 Job 后续步骤复用")
         }
@@ -185,6 +193,23 @@ internal object GitCredentialConfig {
             check = false,
             captureOutput = true,
         )
+        runCommand(
+            listOf("git", "config", "--global", "--unset-all", "credential.helper", "^$"),
+            check = false,
+            captureOutput = true,
+        )
+    }
+
+    internal fun hasActiveFastHelper(
+        configuredHelpers: List<String>,
+        supportsEmptyCredentialHelper: Boolean,
+    ): Boolean {
+        if (!supportsEmptyCredentialHelper) {
+            return configuredHelpers.any { it.contains(FastGitCredentialHelper::class.java.name) }
+        }
+        val lastResetIndex = configuredHelpers.indexOfLast { it.isBlank() }
+        return configuredHelpers.drop(lastResetIndex + 1)
+            .any { it.contains(FastGitCredentialHelper::class.java.name) }
     }
 
     fun removeLocalHelper(repoDir: Path) {
@@ -203,18 +228,35 @@ internal object GitCredentialConfig {
             check = false,
             captureOutput = true,
         )
+        runCommand(
+            listOf("git", "config", "--local", "--unset-all", "credential.username"),
+            cwd = repoDir,
+            check = false,
+            captureOutput = true,
+        )
     }
 
-    fun environment(helperCommand: String): Map<String, String> = linkedMapOf(
-        "GIT_TERMINAL_PROMPT" to "0",
-        "GIT_CONFIG_COUNT" to "3",
-        "GIT_CONFIG_KEY_0" to "credential.helper",
-        "GIT_CONFIG_VALUE_0" to "",
-        "GIT_CONFIG_KEY_1" to "credential.helper",
-        "GIT_CONFIG_VALUE_1" to helperCommand,
-        "GIT_CONFIG_KEY_2" to "credential.useHttpPath",
-        "GIT_CONFIG_VALUE_2" to "false",
-    )
+    fun environment(
+        helperCommand: String,
+        taskId: String,
+        supportsEmptyCredentialHelper: Boolean = GitVersionSupport.supportsEmptyCredentialHelper(),
+    ): Map<String, String> = linkedMapOf<String, String>().apply {
+        put("GIT_TERMINAL_PROMPT", "0")
+        put("GIT_CONFIG_COUNT", "3")
+        if (supportsEmptyCredentialHelper) {
+            putConfig(0, "credential.helper", "")
+            putConfig(1, "credential.helper", helperCommand)
+        } else {
+            putConfig(0, "credential.username", taskId)
+            putConfig(1, "credential.helper", helperCommand)
+        }
+        putConfig(2, "credential.useHttpPath", "false")
+    }
+
+    private fun MutableMap<String, String>.putConfig(index: Int, key: String, value: String) {
+        this["GIT_CONFIG_KEY_$index"] = key
+        this["GIT_CONFIG_VALUE_$index"] = value
+    }
 
     fun taskId(): String {
         val candidates = listOf(
@@ -357,6 +399,37 @@ internal data class GitCredentialRequest(
             )
         }
     }
+}
+
+@Suppress("MagicNumber")
+internal object GitVersionSupport {
+    private val supportEmptyCredentialHelperVersion = computeVersionFromBits(2, 9, 0, 0)
+
+    fun supportsEmptyCredentialHelper(): Boolean {
+        val versionOutput = runCommand(
+            listOf("git", "--version"),
+            check = false,
+            captureOutput = true,
+        ).stdout.trim()
+        return computeGitVersion(versionOutput) >= supportEmptyCredentialHelperVersion
+    }
+
+    internal fun computeGitVersion(version: String): Long {
+        val versionText = version.split(Regex("\\s+"))
+            .firstOrNull { it.firstOrNull()?.isDigit() == true }
+            .orEmpty()
+            .replace("msysgit.", "")
+            .replace("windows.", "")
+        val fields = versionText.split('.')
+        val major = fields.getOrNull(0)?.toIntOrNull() ?: 0
+        val minor = fields.getOrNull(1)?.toIntOrNull() ?: 0
+        val rev = fields.getOrNull(2)?.toIntOrNull() ?: 0
+        val bugfix = fields.getOrNull(3)?.toIntOrNull() ?: 0
+        return computeVersionFromBits(major, minor, rev, bugfix)
+    }
+
+    internal fun computeVersionFromBits(major: Int, minor: Int, rev: Int, bugfix: Int): Long =
+        major * 1000000L + minor * 10000L + rev * 100L + bugfix
 }
 
 internal interface GitCredentialBackend {
