@@ -455,7 +455,6 @@ internal class SystemGitCredentialBackend : GitCredentialBackend {
 
     private fun credentialCacheHelper(): List<String> {
         val socketPath = credentialCacheSocketPath()
-        socketPath.parent?.createDirectories()
         return listOf(
             "credential-cache",
             "--timeout=${TimeUnit.DAYS.toSeconds(7).toInt()}",
