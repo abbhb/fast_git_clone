@@ -5,7 +5,11 @@
     "minimumVersion": "1.8",
     "target": "$bk_java_path -Dfile.encoding=UTF-8 -jar fast_git_clone.jar",
     "packagePath": "fast_git_clone.jar",
-    "demands": []
+    "demands": [],
+    "post": {
+      "postEntryParam": "True",
+      "postCondition": "always()"
+    }
   },
   "input": {
     "repositoryType": {
@@ -87,7 +91,7 @@
       "default": "",
       "placeholder": "请输入 Git 用户名",
       "type": "vuex-input",
-      "desc": "用于写入 Git credential store 的用户名",
+      "desc": "用于 Git credential helper 动态提供认证的用户名",
       "required": false,
       "disabled": false,
       "hidden": false,
@@ -107,7 +111,7 @@
       "default": "",
       "placeholder": "请输入 Git Token 或密码",
       "type": "vuex-input",
-      "desc": "用于写入 Git credential store 的访问凭证",
+      "desc": "用于 Git credential helper 动态提供认证的访问凭证，不会写入 ~/.git-credentials；同一 Job 后续步骤可复用，构建结束清理",
       "required": false,
       "disabled": false,
       "hidden": false,
@@ -127,7 +131,7 @@
       "default": "code.cwoa.net",
       "placeholder": "code.cwoa.net",
       "type": "vuex-input",
-      "desc": "写入 ~/.git-credentials 的 Git 域名",
+      "desc": "自定义仓库 URL 模式下用于解析认证域名，凭证通过 Git credential helper 提供",
       "required": false,
       "disabled": false,
       "hidden": false,

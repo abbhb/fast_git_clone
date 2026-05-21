@@ -6,7 +6,7 @@
 
 - 支持按蓝盾代码库选择或按代码库别名输入，自动读取代码库自身绑定的授权信息。
 - 保留自定义 Git 仓库 URL + 用户名 + Token 的原有使用方式。
-- 配置 Git credential store，并写入 `code.cwoa.net` 访问凭证。
+- 通过 Git credential helper 动态提供 HTTPS 凭证，不写入 `~/.git-credentials` 明文文件。
 - 通过本地缓存目录复用 Git 仓库，减少重复全量 clone。
 - 按输入分支强制同步远端分支内容。
 - 使用 `rsync --delete` 将代码复制到目标目录，默认排除 `.git`，可通过 `EXCLUDE_GIT_DIR` 动态控制是否保留，支持 `!${{variables.xxx}}` 取反。
@@ -21,6 +21,10 @@
 - `按自定义仓库 URL 输入`：沿用原有的 Git 仓库地址、Git 用户名、Git Token、Git 域名参数。
 
 选择蓝盾代码库时不会额外展示凭证输入项。运行时会参考 `ci-checkout` 的逻辑：如果代码库授权类型是 `OAUTH`，使用代码库授权人的 OAuth token；否则使用代码库详情中的 `credentialId` 调用蓝盾凭证服务读取凭证。日志只打印 `credentialId`、授权类型和代码库信息，不打印 token、密码或私钥。
+
+HTTPS 凭证不会写入 `~/.git-credentials`。插件会把自身注册为 Git credential helper，并在拉取前把用户名密码写入安全后端：Linux 使用 `git credential-cache` 的内存缓存，macOS 使用系统 Keychain，Windows 使用 Git Credential Manager/Windows Credential Manager。插件自己的 `clone/fetch` 会使用带 taskId 的 helper；同时也会写入默认 host 凭证并安装无 taskId 的全局 helper，让同一个 Job 后续 Bash 步骤中的 `git fetch`、`git push` 等命令可以复用凭证。
+
+这个传递行为是有意保留的：同一个 Job 内如果连续执行多个拉取步骤，后一个步骤写入的同 host 凭证会覆盖前一个步骤，后续 Bash 默认使用最后一次写入的身份。构建结束时会通过 post action 清理本插件写入的 helper 配置和凭证。构建机不建议额外配置 `git config --global credential.helper store`，否则 Git 在认证成功后可能把凭证再写入明文 store。
 
 ## 打包
 

@@ -13,8 +13,6 @@ import com.tencent.bk.devops.atom.spi.TaskAtom
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.math.BigInteger
-import java.net.URI
-import java.net.URLEncoder
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.SecureRandom
@@ -36,19 +34,36 @@ import javax.crypto.spec.SecretKeySpec
 import kotlin.io.path.createDirectories
 import kotlin.io.path.exists
 import kotlin.io.path.isDirectory
-import kotlin.io.path.readText
 import kotlin.io.path.writeText
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 
 @AtomService(paramClass = FastGitCloneParam::class)
 class FastGitCloneAtom : TaskAtom<FastGitCloneParam> {
     override fun execute(atomContext: AtomContext<FastGitCloneParam>) {
+        if (atomContext.param.postEntryParam == "True") {
+            FastGitCloneRunner().cleanup(atomContext.param)
+            return
+        }
         val result = FastGitCloneRunner().run(atomContext.param)
         atomContext.result.data = result.mapValuesTo(linkedMapOf()) { StringData(it.value) as DataField }
     }
 }
 
 class FastGitCloneRunner {
+    fun cleanup(param: FastGitCloneParam) {
+        Log.warning("执行 fast_git_clone post action，清理 Git credential helper 凭证")
+        val repositoryUrl = runCatching { resolveRepositoryUrl(param) }
+            .onFailure { Log.warning("post action 无法解析仓库地址，跳过凭证后端清理: ${it.message}") }
+            .getOrNull()
+        val cacheDir = runCatching {
+            normalizePath(param.cacheDir.ifBlank { "\${{ci.workspace}}/git-cache/kingeye" }, param)
+        }.getOrNull()?.let(Paths::get)
+        repositoryUrl?.let { url ->
+            runCatching { GitCredentialSession.cleanup(url, cacheDir) }
+                .onFailure { Log.warning("post action 清理 Git credential helper 失败: ${it.message}") }
+        }
+    }
+
     fun run(param: FastGitCloneParam): Map<String, String> {
         val gitSource = resolveGitSource(param)
         val repoUrl = gitSource.repositoryUrl
@@ -74,7 +89,7 @@ class FastGitCloneRunner {
 
         val gitEnv = configureGitAuth(gitSource)
         try {
-            syncGitCache(repoUrl, targetBranch, cacheDir, gitEnv)
+            syncGitCache(repoUrl, targetBranch, cacheDir, gitEnv, gitSource.auth)
         } finally {
             gitSource.auth.cleanup()
         }
@@ -119,6 +134,20 @@ class FastGitCloneRunner {
                     auth = auth,
                     gitHost = hostFromUrl(repository.url),
                 )
+            }
+            else -> throw PluginException("不支持的代码库来源: $repositoryType")
+        }
+    }
+
+    private fun resolveRepositoryUrl(param: FastGitCloneParam): String {
+        return when (val repositoryType = param.repositoryType.ifBlank { RepositoryType.URL.name }.trim().uppercase()) {
+            RepositoryType.URL.name -> requireValue(param.kingeyeGitRepo, "KINGEYE_GIT_REPO")
+            RepositoryType.ID.name, RepositoryType.NAME.name -> {
+                val repositoryId = when (repositoryType) {
+                    RepositoryType.ID.name -> requireValue(param.repositoryHashId, "repositoryHashId")
+                    else -> requireValue(param.repositoryName, "repositoryName")
+                }
+                requireValue(repositoryApi.getRepository(repositoryId, repositoryType).url, "repository.url")
             }
             else -> throw PluginException("不支持的代码库来源: $repositoryType")
         }
@@ -241,35 +270,17 @@ class FastGitCloneRunner {
     private fun configureGitAuth(gitSource: GitSource): Map<String, String> {
         return when (val auth = gitSource.auth) {
             is GitAuth.Http -> {
-                configureGitCredentials(auth.username, auth.password, gitSource.gitHost)
-                emptyMap()
+                configureGitCredentials(auth, gitSource.repositoryUrl)
             }
             is GitAuth.Ssh -> configureSshCredentials(auth)
         }
     }
 
-    private fun configureGitCredentials(gitUsername: String, gitToken: String, gitHost: String) {
-        runCommand(listOf("git", "config", "--global", "credential.helper", "store"))
-        val credentialsPath = GitCredentialStore.credentialsPath()
-        val normalizedHost = GitCredentialStore.normalizeHost(gitHost)
-        val credentialLine = GitCredentialStore.credentialLine(gitUsername, gitToken, normalizedHost)
-        val credentialLines = if (credentialsPath.exists()) {
-            GitCredentialStore.updatedCredentialLines(
-                existingLines = credentialsPath.readText().lineSequence(),
-                normalizedHost = normalizedHost,
-                credentialLine = credentialLine,
-            )
-        } else {
-            listOf(credentialLine)
-        }
-        credentialsPath.writeText(credentialLines.joinToString("\n") + "\n")
-        runCatching {
-            Files.setPosixFilePermissions(
-                credentialsPath,
-                setOf(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
-            )
-        }
-        Log.info("Git credential store 已配置: $normalizedHost")
+    private fun configureGitCredentials(auth: GitAuth.Http, repositoryUrl: String): Map<String, String> {
+        val session = GitCredentialSession.create(repositoryUrl, auth.username, auth.password)
+        auth.credentialSession = session
+        session.store()
+        return session.gitEnvironment()
     }
 
     private fun configureSshCredentials(auth: GitAuth.Ssh): Map<String, String> {
@@ -290,13 +301,20 @@ class FastGitCloneRunner {
         return mapOf("GIT_SSH_COMMAND" to "ssh -i ${keyPath.toAbsolutePath()} -o StrictHostKeyChecking=no")
     }
 
-    private fun syncGitCache(repoUrl: String, targetBranch: String, cacheDir: String, gitEnv: Map<String, String>) {
+    private fun syncGitCache(
+        repoUrl: String,
+        targetBranch: String,
+        cacheDir: String,
+        gitEnv: Map<String, String>,
+        auth: GitAuth,
+    ) {
         val cachePath = Paths.get(cacheDir)
         if (!cachePath.resolve(".git").isDirectory()) {
             Log.info("首次 clone 仓库...")
             clearIncompleteCache(cachePath)
             cloneRepositoryWithRetry(repoUrl, cacheDir, gitEnv)
         }
+        configureLocalCredentialHelper(cachePath, auth)
 
         Log.info("同步远程仓库...")
         runCommand(listOf("git", "remote", "set-url", "origin", repoUrl), cwd = cachePath, env = gitEnv)
@@ -362,6 +380,12 @@ class FastGitCloneRunner {
         throw lastError ?: PluginException("首次 clone 仓库失败")
     }
 
+    private fun configureLocalCredentialHelper(cachePath: Path, auth: GitAuth) {
+        if (auth is GitAuth.Http) {
+            auth.credentialSession?.configureLocalRepository(cachePath)
+        }
+    }
+
     private fun clearIncompleteCache(cachePath: Path) {
         if (cachePath.exists()) {
             cachePath.toFile().deleteRecursively()
@@ -394,7 +418,7 @@ class FastGitCloneRunner {
     }
 
     private fun hostFromUrl(repoUrl: String): String = runCatching {
-        GitCredentialStore.normalizeHost(repoUrl)
+        GitCredentialConfig.normalizeHost(repoUrl)
     }.getOrElse {
         throw PluginException("无法从仓库地址解析 Git 域名: ${maskUrl(repoUrl)}")
     }
@@ -406,58 +430,6 @@ class FastGitCloneRunner {
 
     private val repositoryApi = RepositoryApi()
     private val credentialApi = CredentialApiClient()
-}
-
-internal object GitCredentialStore {
-    fun credentialsPath(): Path {
-        val gitHome = System.getenv("HOME")?.takeIf { it.isNotBlank() } ?: System.getProperty("user.home")
-        return Paths.get(gitHome, ".git-credentials")
-    }
-
-    fun normalizeHost(value: String): String {
-        val trimmed = value.trim()
-        val host = when {
-            trimmed.startsWith("http://") || trimmed.startsWith("https://") ->
-                runCatching { hostWithPort(URI(trimmed)) }.getOrDefault("")
-            trimmed.contains('@') && trimmed.contains(':') ->
-                trimmed.substringAfter('@').substringBefore(':')
-            else -> trimmed
-                .removePrefix("https://")
-                .removePrefix("http://")
-                .substringBefore('/')
-                .trimEnd('/')
-        }.trim().lowercase(Locale.ROOT)
-        return host.ifBlank { throw PluginException("无法从 Git 地址解析域名") }
-    }
-
-    fun credentialLine(gitUsername: String, gitToken: String, normalizedHost: String): String =
-        "https://${urlEncode(gitUsername)}:${urlEncode(gitToken)}@$normalizedHost"
-
-    fun updatedCredentialLines(
-        existingLines: Sequence<String>,
-        normalizedHost: String,
-        credentialLine: String,
-    ): List<String> {
-        val keptLines = existingLines
-            .map { it.trim() }
-            .filter { it.isNotBlank() && it.contains("://") }
-            .filterNot { credentialHostMatches(it, normalizedHost) }
-            .toMutableList()
-        keptLines.add(credentialLine)
-        return keptLines
-    }
-
-    fun credentialHostMatches(credentialLine: String, normalizedHost: String): Boolean {
-        val uri = runCatching { URI(credentialLine) }.getOrNull() ?: return false
-        return hostWithPort(uri) == normalizedHost.lowercase(Locale.ROOT)
-    }
-
-    private fun hostWithPort(uri: URI): String {
-        val host = uri.host.orEmpty().lowercase(Locale.ROOT)
-        return if (host.isNotBlank() && uri.port >= 0) "$host:${uri.port}" else host
-    }
-
-    private fun urlEncode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.name())
 }
 
 internal object BooleanParam {
@@ -492,7 +464,7 @@ internal object RsyncCommand {
         if (pathValue.endsWith(java.io.File.separator)) pathValue else pathValue + java.io.File.separator
 }
 
-private fun runCommand(
+internal fun runCommand(
     command: List<String>,
     cwd: Path? = null,
     check: Boolean = true,
@@ -544,12 +516,12 @@ private fun maskCommand(command: List<String>): List<String> =
         }
     }
 
-private fun maskMessage(message: String): String =
+internal fun maskMessage(message: String): String =
     message.replace(Regex("(https?://)[^/@:]+:[^/@]+@"), "$1***:***@")
 
 class PluginException(message: String) : RuntimeException(message)
 
-private data class CommandResult(val exitCode: Int, val stdout: String, val stderr: String)
+internal data class CommandResult(val exitCode: Int, val stdout: String, val stderr: String)
 
 private data class GitSource(
     val repositoryType: String,
@@ -562,7 +534,9 @@ private data class GitSource(
 private sealed class GitAuth {
     open fun cleanup() = Unit
 
-    data class Http(val username: String, val password: String) : GitAuth()
+    data class Http(val username: String, val password: String) : GitAuth() {
+        var credentialSession: GitCredentialSession? = null
+    }
 
     data class Ssh(val privateKey: String, val passphrase: String) : GitAuth() {
         var keyDir: Path? = null
@@ -826,7 +800,7 @@ private data class DHKeyPair(
     val privateKey: ByteArray,
 )
 
-private object Log {
+internal object Log {
     fun info(message: String) = println("##[info]$message")
     fun warning(message: String) = println("##[warning]$message")
 }
