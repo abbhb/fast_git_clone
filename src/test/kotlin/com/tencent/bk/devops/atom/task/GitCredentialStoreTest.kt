@@ -4,7 +4,10 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.net.URI
+import java.nio.file.Files
 import java.nio.file.Paths
+import java.nio.file.attribute.PosixFileAttributeView
+import java.nio.file.attribute.PosixFilePermission
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -79,6 +82,41 @@ class GitCredentialHelperTest {
         )
         assertNull(backend.get(URI("https://code.cwoa.net/")))
         assertNull(backend.get(URI("https://task-123.code.cwoa.net/")))
+    }
+
+    @Test
+    fun `tightens an existing loose credential cache directory`() {
+        val directory = Files.createTempDirectory("fast-git-clone-credential-")
+        try {
+            if (Files.getFileAttributeView(directory, PosixFileAttributeView::class.java) == null) {
+                return
+            }
+            Files.setPosixFilePermissions(
+                directory,
+                setOf(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE,
+                    PosixFilePermission.GROUP_READ,
+                    PosixFilePermission.GROUP_EXECUTE,
+                    PosixFilePermission.OTHERS_READ,
+                    PosixFilePermission.OTHERS_EXECUTE,
+                ),
+            )
+
+            tightenExistingCredentialCacheDirectory(directory)
+
+            assertEquals(
+                setOf(
+                    PosixFilePermission.OWNER_READ,
+                    PosixFilePermission.OWNER_WRITE,
+                    PosixFilePermission.OWNER_EXECUTE,
+                ),
+                Files.getPosixFilePermissions(directory),
+            )
+        } finally {
+            directory.toFile().deleteRecursively()
+        }
     }
 
     private fun runProgram(input: String, args: Array<String>, backend: GitCredentialBackend): String {

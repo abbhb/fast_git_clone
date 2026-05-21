@@ -9,6 +9,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
+import java.nio.file.attribute.PosixFilePermission
 import java.security.SecureRandom
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -455,6 +456,7 @@ internal class SystemGitCredentialBackend : GitCredentialBackend {
 
     private fun credentialCacheHelper(): List<String> {
         val socketPath = credentialCacheSocketPath()
+        socketPath.parent?.let(::tightenExistingCredentialCacheDirectory)
         return listOf(
             "credential-cache",
             "--timeout=${TimeUnit.DAYS.toSeconds(7).toInt()}",
@@ -490,6 +492,24 @@ internal class SystemGitCredentialBackend : GitCredentialBackend {
 private data class GitCredentialProcessResult(val exitCode: Int, val stdout: String)
 
 private fun userHome(): String = System.getenv("HOME")?.takeIf { it.isNotBlank() } ?: System.getProperty("user.home")
+
+internal fun tightenExistingCredentialCacheDirectory(directory: Path) {
+    if (!directory.exists() || isWindows()) {
+        return
+    }
+    runCatching {
+        Files.setPosixFilePermissions(
+            directory,
+            setOf(
+                PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE,
+                PosixFilePermission.OWNER_EXECUTE,
+            ),
+        )
+    }.getOrElse { error ->
+        throw PluginException("修复 Git credential-cache 目录权限失败: ${directory.toAbsolutePath()}, ${error.message}")
+    }
+}
 
 private fun isMac(): Boolean = System.getProperty("os.name").lowercase(Locale.ROOT).contains("mac")
 
