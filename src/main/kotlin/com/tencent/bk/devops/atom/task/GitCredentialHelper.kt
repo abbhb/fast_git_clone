@@ -83,6 +83,7 @@ internal class GitCredentialSession private constructor(
         val credential = request.credential ?: throw PluginException("Git HTTP 凭证为空")
         store.add(request.targetUri, credential)
         request.compatibleTaskUris(taskId).forEach { store.add(it, credential) }
+        PlaintextGitCredentialStore.erase(request.credentialStoreUris(taskId))
         GitCredentialConfig.configureGlobalHelper(globalHelperCommand)
         Log.info("Git credential helper 已写入安全凭证后端: ${request.host}")
     }
@@ -130,6 +131,7 @@ internal class GitCredentialSession private constructor(
             val store = SystemGitCredentialBackend()
             store.delete(request.targetUri)
             request.compatibleTaskUris(taskId).forEach { store.delete(it) }
+            PlaintextGitCredentialStore.erase(request.credentialStoreUris(taskId))
             cacheDir?.let(GitCredentialConfig::removeLocalHelper)
             GitCredentialConfig.removeGlobalHelper()
             Log.info("Git credential helper 已清理: ${request.host}")
@@ -166,11 +168,20 @@ internal object GitCredentialConfig {
 
     fun configureGlobalHelper(helperCommand: String) {
         val supportsEmptyCredentialHelper = GitVersionSupport.supportsEmptyCredentialHelper()
-        val configuredHelpers = runCommand(
+        var configuredHelpers = runCommand(
             listOf("git", "config", "--global", "--get-all", "credential.helper"),
             check = false,
             captureOutput = true,
         ).stdout.lineSequence().map { it.trim() }.toList()
+        if (shouldResetGlobalCredentialHelpers(configuredHelpers, supportsEmptyCredentialHelper)) {
+            runCommand(
+                listOf("git", "config", "--global", "--unset-all", "credential.helper"),
+                check = false,
+                captureOutput = true,
+            )
+            configuredHelpers = emptyList()
+            Log.warning("当前 Git 版本不支持空 credential.helper，已清理全局 credential.helper，避免凭证写入明文 store")
+        }
         if (!hasActiveFastHelper(configuredHelpers, supportsEmptyCredentialHelper)) {
             if (supportsEmptyCredentialHelper) {
                 runCommand(listOf("git", "config", "--global", "--add", "credential.helper", ""))
@@ -210,6 +221,13 @@ internal object GitCredentialConfig {
         val lastResetIndex = configuredHelpers.indexOfLast { it.isBlank() }
         return configuredHelpers.drop(lastResetIndex + 1)
             .any { it.contains(FastGitCredentialHelper::class.java.name) }
+    }
+
+    internal fun shouldResetGlobalCredentialHelpers(
+        configuredHelpers: List<String>,
+        supportsEmptyCredentialHelper: Boolean,
+    ): Boolean = !supportsEmptyCredentialHelper && configuredHelpers.any { helper ->
+        helper.isNotBlank() && !helper.contains(FastGitCredentialHelper::class.java.name)
     }
 
     fun removeLocalHelper(repoDir: Path) {
@@ -337,6 +355,8 @@ internal data class GitCredentialRequest(
         .map { URI("$it://${GitCredentialConfig.scopedHost(host, taskId)}/") }
         .distinct()
 
+    fun credentialStoreUris(taskId: String): List<URI> = (listOf(targetUri) + compatibleTaskUris(taskId)).distinct()
+
     fun withCredential(credential: StoredGitCredential): GitCredentialRequest = copy(
         username = credential.username,
         password = credential.password,
@@ -440,6 +460,42 @@ internal interface GitCredentialBackend {
 
 internal data class StoredGitCredential(val username: String, val password: String) {
     val isEmpty: Boolean get() = username.isBlank() && password.isBlank()
+}
+
+internal object PlaintextGitCredentialStore {
+    fun erase(targetUris: Iterable<URI>) {
+        targetUris.forEach { targetUri ->
+            runCatching { erase(targetUri) }
+                .onFailure { error ->
+                    Log.warning(
+                        "清理明文 Git credential-store 失败: ${GitCredentialConfig.normalizeHost(targetUri.host + portSuffix(targetUri))}, ${error.message}",
+                    )
+                }
+        }
+    }
+
+    private fun erase(targetUri: URI) {
+        val command = listOf("git", "credential-store", "erase")
+        val process = ProcessBuilder(command)
+            .redirectOutput(discardProcessOutput())
+            .redirectError(discardProcessOutput())
+            .start()
+        process.outputStream.use { output ->
+            output.write(gitCredentialEraseInput(targetUri).toByteArray(StandardCharsets.UTF_8))
+        }
+        if (!process.waitFor(GIT_CREDENTIAL_HELPER_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            process.destroyForcibly()
+            throw PluginException("Git credential-store 清理超时")
+        }
+    }
+
+    private fun gitCredentialEraseInput(targetUri: URI): String = buildString {
+        append("protocol=").append(targetUri.scheme).append('\n')
+        append("host=").append(GitCredentialConfig.normalizeHost(targetUri.host + portSuffix(targetUri))).append('\n')
+        append('\n')
+    }
+
+    private fun portSuffix(uri: URI): String = if (uri.port >= 0) ":${uri.port}" else ""
 }
 
 internal class SystemGitCredentialBackend : GitCredentialBackend {

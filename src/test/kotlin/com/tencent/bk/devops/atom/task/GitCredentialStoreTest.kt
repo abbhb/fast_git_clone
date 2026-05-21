@@ -56,6 +56,34 @@ class GitCredentialHelperTest {
     }
 
     @Test
+    fun `resets global helpers on old git when plaintext store may be active`() {
+        val fastHelper = "!/usr/bin/java -cp /tmp/fast_git_clone.jar ${FastGitCredentialHelper::class.java.name}"
+
+        assertTrue(GitCredentialConfig.shouldResetGlobalCredentialHelpers(listOf("store"), false))
+        assertTrue(GitCredentialConfig.shouldResetGlobalCredentialHelpers(listOf("cache", fastHelper), false))
+        assertFalse(GitCredentialConfig.shouldResetGlobalCredentialHelpers(listOf(fastHelper), false))
+        assertFalse(GitCredentialConfig.shouldResetGlobalCredentialHelpers(listOf("store"), true))
+    }
+
+    @Test
+    fun `computes plaintext credential store scrub targets`() {
+        val request = GitCredentialRequest.fromRepositoryUrl(
+            repositoryUrl = "https://oauth2:token@code.cwoa.net:8443/group/repo.git",
+            username = "oauth2",
+            password = "token",
+        )
+
+        assertEquals(
+            listOf(
+                URI("https://code.cwoa.net:8443/"),
+                URI("https://task-123.code.cwoa.net:8443/"),
+                URI("http://task-123.code.cwoa.net:8443/"),
+            ),
+            request.credentialStoreUris("task-123"),
+        )
+    }
+
+    @Test
     fun `uses credential username fallback when empty helper is not supported`() {
         val helperCommand = GitCredentialConfig.helperCommand(
             taskId = "task-1",
