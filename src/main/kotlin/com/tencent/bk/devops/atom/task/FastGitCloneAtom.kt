@@ -40,16 +40,29 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider
 @AtomService(paramClass = FastGitCloneParam::class)
 class FastGitCloneAtom : TaskAtom<FastGitCloneParam> {
     override fun execute(atomContext: AtomContext<FastGitCloneParam>) {
-        if (atomContext.param.postEntryParam == "True") {
-            FastGitCloneRunner().cleanup(atomContext.param)
-            return
+        val runner = FastGitCloneRunner()
+        try {
+            if (atomContext.param.postEntryParam == "True") {
+                runner.cleanup(atomContext.param)
+                return
+            }
+            val result = runner.run(atomContext.param)
+            atomContext.result.data = result.mapValuesTo(linkedMapOf()) { StringData(it.value) as DataField }
+        } catch (error: PluginException) {
+            if (RuntimeCancellationController.coordinator.isCancellationRequested()) {
+                atomContext.result.status = com.tencent.bk.devops.atom.common.Status.error
+                atomContext.result.message = error.message
+                Log.warning("fast_git_clone 在取消后结束: ${error.message}")
+                return
+            }
+            throw error
         }
-        val result = FastGitCloneRunner().run(atomContext.param)
-        atomContext.result.data = result.mapValuesTo(linkedMapOf()) { StringData(it.value) as DataField }
     }
 }
 
-class FastGitCloneRunner {
+class FastGitCloneRunner(
+    private val cancellationCoordinator: CriticalSectionCoordinator = RuntimeCancellationController.coordinator,
+) {
     fun cleanup(param: FastGitCloneParam) {
         Log.warning("执行 fast_git_clone post action，清理 Git credential helper 凭证")
         val repositoryUrl = runCatching { resolveRepositoryUrl(param) }
@@ -85,17 +98,23 @@ class FastGitCloneRunner {
         }
         Log.info("缓存目录: $cacheDir")
         Log.info("目标目录: $targetDir")
-            Log.info("同步到目标目录时${if (excludeGitDir) "排除" else "保留"} .git 目录")
+        Log.info("同步到目标目录时${if (excludeGitDir) "排除" else "保留"} .git 目录")
 
         val gitEnv = configureGitAuth(gitSource)
         try {
-            syncGitCache(repoUrl, targetBranch, cacheDir, gitEnv, gitSource.auth)
+            CommandCancellationContext.withCoordinator(cancellationCoordinator) {
+                cancellationCoordinator.runCriticalSection("git-checkout") {
+                    syncGitCache(repoUrl, targetBranch, cacheDir, gitEnv, gitSource.auth)
+                }
+            }
         } finally {
             gitSource.auth.cleanup()
         }
+        ensureNotCanceled("Git 同步已完成，收到取消信号，跳过后续 rsync 与源材料上报")
         val commitId = getCommitId(cacheDir)
         val commitMessage = getCommitMessage(cacheDir)
         rsyncToTarget(cacheDir, targetDir, excludeGitDir)
+        ensureNotCanceled("代码已同步到缓存，收到取消信号，跳过源材料上报")
         reportSourceMaterial(gitSource, targetBranch, commitId, commitMessage)
 
         Log.info("分支: $targetBranch")
@@ -318,6 +337,7 @@ class FastGitCloneRunner {
             clearIncompleteCache(cachePath)
             cloneRepositoryWithRetry(repoUrl, cacheDir, gitEnv)
         }
+        GitCacheRecovery.cleanupResidualState(cachePath)
         configureLocalCredentialHelper(cachePath, auth)
 
         Log.info("同步远程仓库...")
@@ -329,6 +349,10 @@ class FastGitCloneRunner {
         )
         runCommand(listOf("git", "fsck"), cwd = cachePath, check = false, env = gitEnv)
         fetchTargetBranch(cachePath, targetBranch, gitEnv)
+        if (GitCacheRecovery.hasInterruptedMerge(cachePath)) {
+            Log.warning("检测到上次异常终止遗留的 merge 状态，先执行 git merge --abort")
+            runCommand(listOf("git", "merge", "--abort"), cwd = cachePath, check = false, env = gitEnv)
+        }
         runCommand(listOf("git", "reset", "--hard"), cwd = cachePath, env = gitEnv)
         runCommand(listOf("git", "clean", "-fdx"), cwd = cachePath, env = gitEnv)
 
@@ -393,6 +417,12 @@ class FastGitCloneRunner {
     private fun clearIncompleteCache(cachePath: Path) {
         if (cachePath.exists()) {
             cachePath.toFile().deleteRecursively()
+        }
+    }
+
+    private fun ensureNotCanceled(message: String) {
+        if (cancellationCoordinator.isCancellationRequested()) {
+            throw PluginException(message)
         }
     }
 
@@ -515,6 +545,7 @@ internal fun runCommand(
     if (env.isNotEmpty()) {
         processBuilder.environment().putAll(env)
     }
+    processBuilder.redirectInput(ProcessBuilder.Redirect.INHERIT)
     val stdout = ByteArrayOutputStream()
     val stderr = ByteArrayOutputStream()
     if (captureOutput) {
@@ -526,21 +557,27 @@ internal fun runCommand(
     }
 
     val process = processBuilder.start()
-    if (captureOutput) {
-        process.inputStream.copyTo(stdout)
-        process.errorStream.copyTo(stderr)
+    val cancellationCoordinator = CommandCancellationContext.currentCoordinator()
+    cancellationCoordinator.onCommandStart(maskCommand(command).joinToString(" "))
+    try {
+        if (captureOutput) {
+            process.inputStream.copyTo(stdout)
+            process.errorStream.copyTo(stderr)
+        }
+        val exitCode = process.waitFor()
+        val result = CommandResult(
+            exitCode = exitCode,
+            stdout = stdout.toString(StandardCharsets.UTF_8.name()),
+            stderr = stderr.toString(StandardCharsets.UTF_8.name()),
+        )
+        if (check && exitCode != 0) {
+            val errorMessage = result.stderr.trim().ifBlank { "命令执行失败" }
+            throw PluginException("$errorMessage: ${maskCommand(command).joinToString(" ")}")
+        }
+        return result
+    } finally {
+        cancellationCoordinator.onCommandEnd()
     }
-    val exitCode = process.waitFor()
-    val result = CommandResult(
-        exitCode = exitCode,
-        stdout = stdout.toString(StandardCharsets.UTF_8.name()),
-        stderr = stderr.toString(StandardCharsets.UTF_8.name()),
-    )
-    if (check && exitCode != 0) {
-        val errorMessage = result.stderr.trim().ifBlank { "命令执行失败" }
-        throw PluginException("$errorMessage: ${maskCommand(command).joinToString(" ")}")
-    }
-    return result
 }
 
 private fun maskCommand(command: List<String>): List<String> =
