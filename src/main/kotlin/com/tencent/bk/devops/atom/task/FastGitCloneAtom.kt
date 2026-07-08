@@ -60,7 +60,7 @@ class FastGitCloneAtom : TaskAtom<FastGitCloneParam> {
     }
 }
 
-class FastGitCloneRunner(
+internal class FastGitCloneRunner(
     private val cancellationCoordinator: CriticalSectionCoordinator = RuntimeCancellationController.coordinator,
 ) {
     fun cleanup(param: FastGitCloneParam) {
@@ -101,21 +101,21 @@ class FastGitCloneRunner(
         Log.info("同步到目标目录时${if (excludeGitDir) "排除" else "保留"} .git 目录")
 
         val gitEnv = configureGitAuth(gitSource)
+        lateinit var commitId: String
+        lateinit var commitMessage: String
         try {
             CommandCancellationContext.withCoordinator(cancellationCoordinator) {
                 cancellationCoordinator.runCriticalSection("git-checkout") {
                     syncGitCache(repoUrl, targetBranch, cacheDir, gitEnv, gitSource.auth)
+                    commitId = getCommitId(cacheDir)
+                    commitMessage = getCommitMessage(cacheDir)
+                    rsyncToTarget(cacheDir, targetDir, excludeGitDir)
+                    reportSourceMaterial(gitSource, targetBranch, commitId, commitMessage)
                 }
             }
         } finally {
             gitSource.auth.cleanup()
         }
-        ensureNotCanceled("Git 同步已完成，收到取消信号，跳过后续 rsync 与源材料上报")
-        val commitId = getCommitId(cacheDir)
-        val commitMessage = getCommitMessage(cacheDir)
-        rsyncToTarget(cacheDir, targetDir, excludeGitDir)
-        ensureNotCanceled("代码已同步到缓存，收到取消信号，跳过源材料上报")
-        reportSourceMaterial(gitSource, targetBranch, commitId, commitMessage)
 
         Log.info("分支: $targetBranch")
         Log.info("Commit: $commitId")
@@ -332,7 +332,7 @@ class FastGitCloneRunner(
         auth: GitAuth,
     ) {
         val cachePath = Paths.get(cacheDir)
-        if (!cachePath.resolve(".git").isDirectory()) {
+        if (!isUsableGitRepository(cachePath, gitEnv)) {
             Log.info("首次 clone 仓库...")
             clearIncompleteCache(cachePath)
             cloneRepositoryWithRetry(repoUrl, cacheDir, gitEnv)
@@ -417,12 +417,6 @@ class FastGitCloneRunner(
     private fun clearIncompleteCache(cachePath: Path) {
         if (cachePath.exists()) {
             cachePath.toFile().deleteRecursively()
-        }
-    }
-
-    private fun ensureNotCanceled(message: String) {
-        if (cancellationCoordinator.isCancellationRequested()) {
-            throw PluginException(message)
         }
     }
 
@@ -537,7 +531,8 @@ internal fun runCommand(
     captureOutput: Boolean = false,
     env: Map<String, String> = emptyMap(),
 ): CommandResult {
-    Log.info("执行命令: ${maskCommand(command).joinToString(" ")}")
+    val maskedCommand = maskCommand(command).joinToString(" ")
+    Log.info("执行命令: $maskedCommand")
     val processBuilder = ProcessBuilder(command)
     if (cwd != null) {
         processBuilder.directory(cwd.toFile())
@@ -557,14 +552,15 @@ internal fun runCommand(
     }
 
     val process = processBuilder.start()
+    val stdoutThread = if (captureOutput) streamCopyThread("fast-git-clone-stdout", process.inputStream, stdout) else null
+    val stderrThread = if (captureOutput) streamCopyThread("fast-git-clone-stderr", process.errorStream, stderr) else null
+
     val cancellationCoordinator = CommandCancellationContext.currentCoordinator()
-    cancellationCoordinator.onCommandStart(maskCommand(command).joinToString(" "))
+    cancellationCoordinator.onCommandStart(maskedCommand)
     try {
-        if (captureOutput) {
-            process.inputStream.copyTo(stdout)
-            process.errorStream.copyTo(stderr)
-        }
-        val exitCode = process.waitFor()
+        val exitCode = waitForProcessWithoutDestroyingOnInterrupt(process, maskedCommand, cancellationCoordinator)
+        stdoutThread?.join()
+        stderrThread?.join()
         val result = CommandResult(
             exitCode = exitCode,
             stdout = stdout.toString(StandardCharsets.UTF_8.name()),
@@ -572,12 +568,60 @@ internal fun runCommand(
         )
         if (check && exitCode != 0) {
             val errorMessage = result.stderr.trim().ifBlank { "命令执行失败" }
-            throw PluginException("$errorMessage: ${maskCommand(command).joinToString(" ")}")
+            throw PluginException("$errorMessage: $maskedCommand")
         }
         return result
     } finally {
         cancellationCoordinator.onCommandEnd()
     }
+}
+
+private fun streamCopyThread(name: String, input: java.io.InputStream, output: ByteArrayOutputStream): Thread =
+    Thread(
+        {
+            runCatching {
+                input.use { source -> source.copyTo(output) }
+            }
+        },
+        name,
+    ).also {
+        it.isDaemon = true
+        it.start()
+    }
+
+private fun waitForProcessWithoutDestroyingOnInterrupt(
+    process: Process,
+    maskedCommand: String,
+    cancellationCoordinator: CriticalSectionCoordinator,
+): Int {
+    var logged = false
+    while (true) {
+        try {
+            return process.waitFor()
+        } catch (_: InterruptedException) {
+            cancellationCoordinator.markCancellationRequested()
+            if (!logged) {
+                Log.warning("收到取消/中断信号，继续等待当前命令完成: $maskedCommand")
+                logged = true
+            }
+        }
+    }
+}
+
+internal fun isUsableGitRepository(repositoryPath: Path, gitEnv: Map<String, String> = emptyMap()): Boolean {
+    if (!repositoryPath.exists()) {
+        return false
+    }
+    return runCatching {
+        val result = runCommand(
+            listOf("git", "rev-parse", "--is-inside-work-tree"),
+            cwd = repositoryPath,
+            check = false,
+            captureOutput = true,
+            env = gitEnv,
+        )
+        result.exitCode == 0 && result.stdout.trim() == "true"
+    }.getOrDefault(false)
 }
 
 private fun maskCommand(command: List<String>): List<String> =
