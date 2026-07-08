@@ -43,8 +43,12 @@ internal class CriticalSectionCoordinator(
 
     fun isCancellationRequested(): Boolean = cancellationRequested.get()
 
-    fun requestCancellationAndWait(): Boolean {
+    fun markCancellationRequested() {
         cancellationRequested.set(true)
+    }
+
+    fun requestCancellationAndWait(): Boolean {
+        markCancellationRequested()
         val sectionName = activeSectionName.get() ?: return true
         val command = activeCommand.get()
         logger(
@@ -56,12 +60,22 @@ internal class CriticalSectionCoordinator(
                     append("，正在执行命令: ")
                     append(command)
                 }
-                append("，最多等待 ")
-                append(gracePeriodMillis)
-                append("ms 让当前 Git 任务收尾")
+                if (gracePeriodMillis > 0) {
+                    append("，最多等待 ")
+                    append(gracePeriodMillis)
+                    append("ms 让当前 Git 任务收尾")
+                } else {
+                    append("，持续等待直到当前 Git 任务收尾")
+                }
             },
         )
-        val finished = activeSectionCompletion.get()?.await(gracePeriodMillis, TimeUnit.MILLISECONDS) ?: true
+        val latch = activeSectionCompletion.get() ?: return true
+        val finished = if (gracePeriodMillis > 0) {
+            latch.await(gracePeriodMillis, TimeUnit.MILLISECONDS)
+        } else {
+            latch.await()
+            true
+        }
         if (finished) {
             logger("关键区[$sectionName] 已完成，允许插件退出")
         } else {
@@ -74,17 +88,17 @@ internal class CriticalSectionCoordinator(
         fun defaultGracePeriodMillis(): Long {
             val fromMillis = System.getenv("FAST_GIT_CLONE_CANCEL_GRACE_MILLIS")?.trim()
             if (!fromMillis.isNullOrBlank()) {
-                return fromMillis.toLongOrNull()?.takeIf { it > 0 } ?: DEFAULT_GRACE_PERIOD_MILLIS
+                return fromMillis.toLongOrNull()?.takeIf { it > 0 } ?: DEFAULT_GRACE_PERIOD_SECONDS * 1000
             }
             val fromSeconds = System.getenv("FAST_GIT_CLONE_CANCEL_GRACE_SECONDS")?.trim()
             if (!fromSeconds.isNullOrBlank()) {
                 return (fromSeconds.toLongOrNull()?.takeIf { it > 0 } ?: DEFAULT_GRACE_PERIOD_SECONDS) * 1000
             }
-            return DEFAULT_GRACE_PERIOD_MILLIS
+            return WAIT_UNTIL_FINISHED
         }
 
         private const val DEFAULT_GRACE_PERIOD_SECONDS = 180L
-        private const val DEFAULT_GRACE_PERIOD_MILLIS = DEFAULT_GRACE_PERIOD_SECONDS * 1000
+        private const val WAIT_UNTIL_FINISHED = 0L
     }
 }
 
@@ -131,11 +145,11 @@ internal object GitCacheRecovery {
         val removed = linkedSetOf<Path>()
         knownLockFiles(gitDir).forEach { path ->
             if (deleteIfExists(path)) {
-                removed += path
+                removed.add(path)
             }
         }
         listOf(gitDir.resolve("refs"), gitDir.resolve("modules")).forEach { root ->
-            removed += deleteNestedLockFiles(root)
+            removed.addAll(deleteNestedLockFiles(root))
         }
 
         if (removed.isNotEmpty()) {
@@ -164,7 +178,7 @@ internal object GitCacheRecovery {
                 .filter { path -> Files.isRegularFile(path) && path.fileName.toString().endsWith(".lock") }
                 .forEach { path ->
                     if (deleteIfExists(path)) {
-                        removed += path
+                        removed.add(path)
                     }
                 }
         }

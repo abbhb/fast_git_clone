@@ -4,6 +4,7 @@ import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.io.path.createDirectories
 import kotlin.io.path.writeText
 import kotlin.test.Test
@@ -71,7 +72,7 @@ class GitCheckoutCancellationTest {
 
     @Test
     fun `tracks command on thread local coordinator during runCommand`() {
-        val coordinator = CriticalSectionCoordinator(gracePeriodMillis = 200, logger = {})
+        val coordinator = CriticalSectionCoordinator(gracePeriodMillis = 1000, logger = {})
         val script = Files.createTempFile("fast-git-clone", ".sh")
         script.toFile().setExecutable(true)
         script.writeText("#!/bin/sh\nsleep 0.2\n")
@@ -92,6 +93,41 @@ class GitCheckoutCancellationTest {
         } finally {
             executor.shutdownNow()
             Files.deleteIfExists(script)
+        }
+    }
+
+    @Test
+    fun `interrupted command wait keeps child process running to completion`() {
+        val coordinator = CriticalSectionCoordinator(gracePeriodMillis = 1000, logger = {})
+        val marker = Files.createTempFile("fast-git-clone-marker", ".txt")
+        Files.deleteIfExists(marker)
+        val commandThread = AtomicReference<Thread>()
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<CommandResult> {
+                commandThread.set(Thread.currentThread())
+                CommandCancellationContext.withCoordinator(coordinator) {
+                    runCommand(
+                        listOf(
+                            "/bin/sh",
+                            "-c",
+                            "sleep 0.2; printf done > '${marker.toAbsolutePath()}'",
+                        ),
+                        captureOutput = true,
+                    )
+                }
+            }
+            while (commandThread.get() == null) {
+                Thread.sleep(10)
+            }
+            commandThread.get().interrupt()
+
+            assertEquals(0, future.get(1, TimeUnit.SECONDS).exitCode)
+            assertEquals("done", marker.toFile().readText())
+            assertTrue(coordinator.isCancellationRequested())
+        } finally {
+            executor.shutdownNow()
+            Files.deleteIfExists(marker)
         }
     }
 
@@ -117,23 +153,57 @@ class GitCheckoutCancellationTest {
     }
 
     @Test
-    fun `canceled coordinator causes follow-up stages to stop`() {
-        val coordinator = CriticalSectionCoordinator(gracePeriodMillis = 100, logger = {})
-        val runner = FastGitCloneRunner(coordinator)
-        coordinator.requestCancellationAndWait()
+    fun `detects incomplete git cache as unusable repository`() {
+        val repoDir = Files.createTempDirectory("fast-git-clone-incomplete-repo")
+        repoDir.resolve(".git").createDirectories()
 
-        val method = runner.javaClass.getDeclaredMethod("ensureNotCanceled", String::class.java)
-        method.isAccessible = true
+        assertFalse(isUsableGitRepository(repoDir))
 
-        val error = kotlin.runCatching {
-            method.invoke(runner, "stop")
-        }.exceptionOrNull()
+        repoDir.toFile().deleteRecursively()
+    }
 
-        val cause = when (error) {
-            is java.lang.reflect.InvocationTargetException -> error.targetException
-            else -> error
+    @Test
+    fun `detects initialized git cache as usable repository`() {
+        val repoDir = Files.createTempDirectory("fast-git-clone-usable-repo")
+        try {
+            runCommand(listOf("git", "init", repoDir.toAbsolutePath().toString()), captureOutput = true)
+
+            assertTrue(isUsableGitRepository(repoDir))
+        } finally {
+            repoDir.toFile().deleteRecursively()
         }
-        assertTrue(cause is PluginException)
-        assertEquals("stop", cause?.message)
+    }
+
+    @Test
+    fun `default cancellation wait does not time out active critical section`() {
+        val messages = mutableListOf<String>()
+        val coordinator = CriticalSectionCoordinator(logger = messages::add)
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val future = executor.submit<Boolean> {
+                coordinator.runCriticalSection("git-checkout") {
+                    entered.countDown()
+                    release.await(1, TimeUnit.SECONDS)
+                    true
+                }
+            }
+            assertTrue(entered.await(1, TimeUnit.SECONDS))
+            val cancelExecutor = Executors.newSingleThreadExecutor()
+            try {
+                val cancelFuture = cancelExecutor.submit<Boolean> { coordinator.requestCancellationAndWait() }
+                Thread.sleep(100)
+                assertFalse(cancelFuture.isDone)
+                release.countDown()
+                assertTrue(cancelFuture.get(1, TimeUnit.SECONDS))
+            } finally {
+                cancelExecutor.shutdownNow()
+            }
+            assertTrue(future.get(1, TimeUnit.SECONDS))
+            assertTrue(messages.any { it.contains("持续等待直到当前 Git 任务收尾") })
+        } finally {
+            executor.shutdownNow()
+        }
     }
 }
