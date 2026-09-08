@@ -24,7 +24,7 @@
 
 HTTPS 凭证不会写入 `~/.git-credentials`。插件会把自身注册为 Git credential helper，并在拉取前把用户名密码写入安全后端：Linux 使用 `git credential-cache` 的内存缓存，macOS 使用系统 Keychain，Windows 使用 Git Credential Manager/Windows Credential Manager。插件自己的 `clone/fetch` 会使用带 taskId 的 helper；同时也会写入默认 host 凭证并安装无 taskId 的全局 helper，让同一个 Job 后续 Bash 步骤中的 `git fetch`、`git push` 等命令可以复用凭证。
 
-这个传递行为是有意保留的：同一个 Job 内如果连续执行多个拉取步骤，后一个步骤写入的同 host 凭证会覆盖前一个步骤，后续 Bash 默认使用最后一次写入的身份。构建结束时会通过 post action 清理本插件写入的 helper 配置和凭证。构建机不建议额外配置 `git config --global credential.helper store`，否则 Git 在认证成功后可能把凭证再写入明文 store。
+这个传递行为是有意保留的：同一个 Job 内如果连续执行多个拉取步骤，后一个步骤写入的同 host 凭证会先清理旧缓存再写入新凭证，后续 Bash 默认使用最后一次写入的身份。taskId 凭证会同时绑定当前 buildId，避免同一流水线步骤在后续构建中误用构建机上尚未过期的缓存。构建结束时会通过 post action 清理本插件写入的 helper 配置和凭证。构建机不建议额外配置 `git config --global credential.helper store`，否则 Git 在认证成功后可能把凭证再写入明文 store。
 
 ## 打包
 

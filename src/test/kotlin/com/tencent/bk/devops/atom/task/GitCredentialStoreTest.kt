@@ -8,6 +8,7 @@ import java.nio.file.Files
 import java.nio.file.Paths
 import java.nio.file.attribute.PosixFileAttributeView
 import java.nio.file.attribute.PosixFilePermission
+import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -122,6 +123,26 @@ class GitCredentialHelperTest {
     }
 
     @Test
+    fun `scopes a stable build task id to each pipeline execution`() {
+        val firstBuild = mapOf(
+            "BK_CI_BUILD_TASK_ID" to "e-e9335dd8a6334346a78dfc4f27d2672b",
+            "BK_CI_BUILD_ID" to "b-e14607d326ff46dab9ed855fb9de6c6c",
+        )
+        val retriedBuild = firstBuild + (
+            "BK_CI_BUILD_ID" to "b-d34e653fd56c4803aa529319ea7def34"
+        )
+
+        val firstTaskId = GitCredentialConfig.taskId(firstBuild)
+        val retriedTaskId = GitCredentialConfig.taskId(retriedBuild)
+
+        assertEquals(firstTaskId, GitCredentialConfig.taskId(firstBuild))
+        assertFalse(firstTaskId == retriedTaskId)
+        assertTrue(firstTaskId.startsWith("e-e9335dd8a6334346a78dfc4f27d2672b-"))
+        assertTrue(firstTaskId.length <= 63)
+        assertTrue(retriedTaskId.length <= 63)
+    }
+
+    @Test
     fun `helper stores default and task scoped credentials for job sharing`() {
         val backend = InMemoryCredentialBackend()
         runProgram(
@@ -162,6 +183,47 @@ class GitCredentialHelperTest {
         )
         assertNull(backend.get(URI("https://code.cwoa.net/")))
         assertNull(backend.get(URI("https://task-123.code.cwoa.net/")))
+    }
+
+    @Test
+    fun `replaces stale credentials in the real git credential cache`() {
+        if (System.getProperty("os.name").lowercase().contains("win")) {
+            return
+        }
+        val tempRoot = Paths.get("/tmp").takeIf(Files::isDirectory)
+            ?: Paths.get(System.getProperty("java.io.tmpdir"))
+        val cacheDirectory = Files.createTempDirectory(tempRoot, "fast-git-clone-cache-")
+        val socketPath = cacheDirectory.resolve("socket")
+        val helperArgs = listOf(
+            "credential-cache",
+            "--timeout=300",
+            "--socket=$socketPath",
+        )
+        val backend = SystemGitCredentialBackend(helperArgs)
+        val targetUri = URI("https://credential-refresh.test/")
+        val staleCredential = StoredGitCredential("stale-user", "stale-token")
+        val currentCredential = StoredGitCredential("current-user", "current-token")
+
+        try {
+            backend.add(targetUri, staleCredential)
+            backend.add(targetUri, currentCredential)
+            assertEquals(staleCredential, backend.get(targetUri))
+
+            replaceStoredCredentials(backend, listOf(targetUri), currentCredential)
+
+            assertEquals(currentCredential, backend.get(targetUri))
+        } finally {
+            backend.delete(targetUri)
+            val exitProcess = ProcessBuilder(
+                "git",
+                "credential-cache",
+                "--socket=$socketPath",
+                "exit",
+            ).start()
+            exitProcess.outputStream.close()
+            exitProcess.waitFor(5, TimeUnit.SECONDS)
+            cacheDirectory.toFile().deleteRecursively()
+        }
     }
 
     @Test
