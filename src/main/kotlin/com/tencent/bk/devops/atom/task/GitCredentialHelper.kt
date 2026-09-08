@@ -10,6 +10,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 import java.nio.file.StandardCopyOption
 import java.nio.file.attribute.PosixFilePermission
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -57,10 +58,11 @@ internal class GitCredentialHelperProgram(
     private fun store(taskId: String?) {
         val request = GitCredentialRequest.readFrom(standardIn)
         val credential = request.credential ?: return
-        store.add(request.targetUri, credential)
-        if (!taskId.isNullOrBlank()) {
-            request.compatibleTaskUris(taskId).forEach { store.add(it, credential) }
-        }
+        val targetUris = listOf(request.targetUri) + taskId
+            ?.takeIf { it.isNotBlank() }
+            ?.let(request::compatibleTaskUris)
+            .orEmpty()
+        replaceStoredCredentials(store, targetUris, credential)
     }
 
     private fun erase(taskId: String?) {
@@ -81,8 +83,7 @@ internal class GitCredentialSession private constructor(
 ) {
     fun store() {
         val credential = request.credential ?: throw PluginException("Git HTTP 凭证为空")
-        store.add(request.targetUri, credential)
-        request.compatibleTaskUris(taskId).forEach { store.add(it, credential) }
+        replaceStoredCredentials(store, request.credentialStoreUris(taskId), credential)
         PlaintextGitCredentialStore.erase(request.credentialStoreUris(taskId))
         GitCredentialConfig.configureGlobalHelper(globalHelperCommand)
         Log.info("Git credential helper 已写入安全凭证后端: ${request.host}")
@@ -276,13 +277,16 @@ internal object GitCredentialConfig {
         this["GIT_CONFIG_VALUE_$index"] = value
     }
 
-    fun taskId(): String {
+    fun taskId(environment: Map<String, String> = System.getenv()): String {
+        val buildTaskId = environment["BK_CI_BUILD_TASK_ID"]?.takeIf { it.isNotBlank() }
+        if (buildTaskId != null) {
+            return buildScopedTaskId(buildTaskId, environment["BK_CI_BUILD_ID"])
+        }
         val candidates = listOf(
-            System.getenv("BK_CI_BUILD_TASK_ID"),
             listOfNotNull(
-                System.getenv("BK_CI_PIPELINE_ID"),
-                System.getenv("BK_CI_BUILD_ID"),
-                System.getenv("BK_CI_BUILD_JOB_ID"),
+                environment["BK_CI_PIPELINE_ID"],
+                environment["BK_CI_BUILD_ID"],
+                environment["BK_CI_BUILD_JOB_ID"],
             ).joinToString("-").takeIf { it.isNotBlank() },
         )
         return candidates.firstOrNull { !it.isNullOrBlank() }?.let(::sanitizeHostPart)
@@ -330,6 +334,20 @@ internal object GitCredentialConfig {
         .replace(Regex("[^a-z0-9-]+"), "-")
         .trim('-')
         .ifBlank { "task" }
+
+    private fun buildScopedTaskId(buildTaskId: String, buildId: String?): String {
+        val normalizedTaskId = sanitizeHostPart(buildTaskId)
+        val normalizedBuildId = buildId?.takeIf { it.isNotBlank() } ?: return normalizedTaskId
+        val buildHash = MessageDigest.getInstance("SHA-256")
+            .digest(normalizedBuildId.toByteArray(StandardCharsets.UTF_8))
+            .take(BUILD_ID_HASH_BYTES)
+            .joinToString("") { "%02x".format(it) }
+        val taskPart = normalizedTaskId
+            .take(MAX_DNS_LABEL_LENGTH - buildHash.length - 1)
+            .trimEnd('-')
+            .ifBlank { "task" }
+        return "$taskPart-$buildHash"
+    }
 
     private fun randomSuffix(): String {
         val bytes = ByteArray(8)
@@ -458,6 +476,18 @@ internal interface GitCredentialBackend {
     fun delete(targetUri: URI)
 }
 
+internal fun replaceStoredCredentials(
+    store: GitCredentialBackend,
+    targetUris: Iterable<URI>,
+    credential: StoredGitCredential,
+) {
+    targetUris.distinct().forEach { targetUri ->
+        // git credential-cache keeps the first matching entry; store alone does not replace it.
+        store.delete(targetUri)
+        store.add(targetUri, credential)
+    }
+}
+
 internal data class StoredGitCredential(val username: String, val password: String) {
     val isEmpty: Boolean get() = username.isBlank() && password.isBlank()
 }
@@ -498,7 +528,9 @@ internal object PlaintextGitCredentialStore {
     private fun portSuffix(uri: URI): String = if (uri.port >= 0) ":${uri.port}" else ""
 }
 
-internal class SystemGitCredentialBackend : GitCredentialBackend {
+internal class SystemGitCredentialBackend(
+    private val helperArgsOverride: List<String>? = null,
+) : GitCredentialBackend {
     override fun get(targetUri: URI): StoredGitCredential? {
         val output = invoke(resolveBackend(), "get", targetUri)
         if (output.exitCode != 0 || output.stdout.isBlank()) {
@@ -527,7 +559,7 @@ internal class SystemGitCredentialBackend : GitCredentialBackend {
     }
 
     private fun resolveBackend(): List<String> {
-        return when {
+        return helperArgsOverride ?: when {
             isMac() -> {
                 val osxKeychain = listOf("credential-osxkeychain")
                 if (helperExists(osxKeychain.first())) osxKeychain else credentialCacheHelper()
@@ -667,3 +699,5 @@ private fun isMac(): Boolean = System.getProperty("os.name").lowercase(Locale.RO
 private fun isWindows(): Boolean = System.getProperty("os.name").lowercase(Locale.ROOT).contains("win")
 
 private const val GIT_CREDENTIAL_HELPER_TIMEOUT_SECONDS = 30L
+private const val BUILD_ID_HASH_BYTES = 8
+private const val MAX_DNS_LABEL_LENGTH = 63
