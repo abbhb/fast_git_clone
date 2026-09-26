@@ -28,6 +28,7 @@ import java.util.Base64
 import java.util.Locale
 import javax.crypto.Cipher
 import javax.crypto.KeyAgreement
+import javax.crypto.interfaces.DHPrivateKey
 import javax.crypto.interfaces.DHPublicKey
 import javax.crypto.spec.DHParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -379,9 +380,13 @@ internal class FastGitCloneRunner(
             val detail = listOf(result.stderr.trim(), result.stdout.trim())
                 .filter { it.isNotBlank() }
                 .joinToString("; ")
+            val reason = if (isAuthenticationFailure(detail)) {
+                "Git 认证失败，代码库凭证无效、已过期或无权限（不是分支问题）: origin/$targetBranch"
+            } else {
+                "远端分支不存在或无权限访问: origin/$targetBranch"
+            }
             throw PluginException(
-                "远端分支不存在或无权限访问: origin/$targetBranch" +
-                    detail.takeIf { it.isNotBlank() }?.let { "，Git 输出: ${maskMessage(it)}" }.orEmpty(),
+                reason + detail.takeIf { it.isNotBlank() }?.let { "，Git 输出: ${maskMessage(it)}" }.orEmpty(),
             )
         }
     }
@@ -636,6 +641,19 @@ private fun maskCommand(command: List<String>): List<String> =
 internal fun maskMessage(message: String): String =
     message.replace(Regex("(https?://)[^/@:]+:[^/@]+@"), "$1***:***@")
 
+internal fun isAuthenticationFailure(gitOutput: String): Boolean =
+    AUTH_FAILURE_MARKERS.any { marker -> gitOutput.contains(marker, ignoreCase = true) }
+
+private val AUTH_FAILURE_MARKERS = listOf(
+    "Authentication failed",
+    "HTTP Basic: Access denied",
+    "could not read Username",
+    "terminal prompts disabled",
+    "invalid credentials",
+    "returned error: 401",
+    "returned error: 403",
+)
+
 class PluginException(message: String) : RuntimeException(message)
 
 internal data class CommandResult(val exitCode: Int, val stdout: String, val stderr: String)
@@ -839,7 +857,7 @@ private class CredentialApiClient : BaseApi() {
     fun getCredential(credentialId: String): CredentialInfo {
         val keyPair = DH.initKey()
         val publicKey = Base64.getEncoder().encodeToString(keyPair.publicKey)
-        val path = "/ticket/api/build/credentials/${encode(credentialId)}?publicKey=${encode(publicKey)}"
+        val path = buildCredentialRequestPath(encode(credentialId), encode(publicKey))
         val responseContent = try {
             request(buildGet(path), "获取凭证失败")
         } catch (error: IOException) {
@@ -863,25 +881,50 @@ private class CredentialApiClient : BaseApi() {
             v4 = decryptCredentialValue(data.firstText("v4"), serverPublicKey, keyPair.privateKey),
         )
     }
-
-    private fun decryptCredentialValue(value: String, serverPublicKey: String, privateKey: ByteArray): String {
-        if (value.isBlank()) {
-            return ""
-        }
-        if (serverPublicKey.isBlank()) {
-            return value
-        }
-        return runCatching {
-            val decoder = Base64.getDecoder()
-            String(DH.decrypt(decoder.decode(value), decoder.decode(serverPublicKey), privateKey), StandardCharsets.UTF_8)
-        }.getOrElse { value }
-    }
 }
 
-private object DH {
+/**
+ * 蓝盾凭证服务按 `padding` 参数决定 DH 共享密钥是否左填充：bcprov 1.47 起会填充，1.46 及以前不会。
+ * 插件打包的 bcprov 高于 1.46，必须声明 `padding=true`，否则服务端按旧版不填充方式加密，
+ * 会在共享密钥最高字节为 0 时（约 4%）解密失败。
+ */
+internal fun buildCredentialRequestPath(encodedCredentialId: String, encodedPublicKey: String): String =
+    "/ticket/api/build/credentials/$encodedCredentialId?publicKey=$encodedPublicKey&padding=true"
+
+internal fun decryptCredentialValue(value: String, serverPublicKey: String, privateKey: ByteArray): String {
+    if (value.isBlank()) {
+        return ""
+    }
+    if (serverPublicKey.isBlank()) {
+        return value
+    }
+    val decoder = Base64.getDecoder()
+    val encryptedValue = runCatching { decoder.decode(value) }.getOrElse { error ->
+        throw PluginException("蓝盾凭证字段不是合法的 Base64 密文，无法解密: ${error.message}")
+    }
+    val serverPublicKeyBytes = runCatching { decoder.decode(serverPublicKey) }.getOrElse { error ->
+        throw PluginException("蓝盾凭证接口返回的公钥不合法，无法解密: ${error.message}")
+    }
+
+    runCatching { DH.decrypt(encryptedValue, serverPublicKeyBytes, privateKey) }
+        .onSuccess { return String(it, StandardCharsets.UTF_8) }
+
+    Log.warning(
+        "蓝盾凭证按填充方式解密失败，改用不填充的旧版密钥派生重试（bcprov 1.47 起会填充 DH 共享密钥，" +
+            "服务端 padding=false 时按旧版方式加密）",
+    )
+    return runCatching { DH.decrypt(encryptedValue, serverPublicKeyBytes, privateKey, legacy = true) }
+        .map { String(it, StandardCharsets.UTF_8) }
+        .getOrElse { error ->
+            throw PluginException("蓝盾凭证解密失败，请检查插件 bcprov 版本与蓝盾凭证服务的 padding 约定: ${error.message}")
+        }
+}
+
+internal object DH {
     private const val KEY_ALGORITHM = "DH"
     private const val KEY_PROVIDER = "BC"
     private const val SECRET_ALGORITHM = "DES"
+    private const val SECRET_KEY_BYTES = 8
     private val p = BigInteger("16560215747140417249215968347342080587", 16)
     private val g = BigInteger("1234567890", 16)
 
@@ -896,11 +939,23 @@ private object DH {
         return DHKeyPair(keyPair.public.encoded, keyPair.private.encoded)
     }
 
-    fun decrypt(data: ByteArray, publicKey: ByteArray, privateKey: ByteArray): ByteArray {
-        val key = getSecretKey(publicKey, privateKey)
+    fun encrypt(data: ByteArray, publicKey: ByteArray, privateKey: ByteArray, legacy: Boolean = false): ByteArray =
+        doFinal(Cipher.ENCRYPT_MODE, data, publicKey, privateKey, legacy)
+
+    fun decrypt(data: ByteArray, publicKey: ByteArray, privateKey: ByteArray, legacy: Boolean = false): ByteArray =
+        doFinal(Cipher.DECRYPT_MODE, data, publicKey, privateKey, legacy)
+
+    private fun doFinal(
+        mode: Int,
+        data: ByteArray,
+        publicKey: ByteArray,
+        privateKey: ByteArray,
+        legacy: Boolean,
+    ): ByteArray {
+        val key = if (legacy) legacySecretKey(publicKey, privateKey) else getSecretKey(publicKey, privateKey)
         val secretKey = SecretKeySpec(key, SECRET_ALGORITHM)
         val cipher = Cipher.getInstance(secretKey.algorithm)
-        cipher.init(Cipher.DECRYPT_MODE, secretKey)
+        cipher.init(mode, secretKey)
         return cipher.doFinal(data)
     }
 
@@ -914,6 +969,21 @@ private object DH {
         keyAgreement.init(dhPrivateKey)
         keyAgreement.doPhase(dhPublicKey, true)
         return keyAgreement.generateSecret(SECRET_ALGORITHM).encoded
+    }
+
+    /**
+     * bcprov 1.46 及以前的派生方式：共享密钥不做左填充，直接取最左边的 8 字节。
+     * 蓝盾凭证服务 padding=false 时用的就是这种派生（服务端 KeyAgreementNoPaddingSpi）。
+     */
+    private fun legacySecretKey(publicKey: ByteArray, privateKey: ByteArray): ByteArray {
+        val keyFactory = KeyFactory.getInstance(KEY_ALGORITHM)
+        val dhPublicKey = keyFactory.generatePublic(X509EncodedKeySpec(publicKey)) as DHPublicKey
+        val dhPrivateKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privateKey)) as DHPrivateKey
+        val secretBytes = dhPublicKey.y.modPow(dhPrivateKey.x, dhPublicKey.params?.p ?: p).toByteArray()
+        val offset = if (secretBytes.size > 1 && secretBytes[0].toInt() == 0) 1 else 0
+        val key = ByteArray(SECRET_KEY_BYTES)
+        System.arraycopy(secretBytes, offset, key, 0, minOf(secretBytes.size - offset, SECRET_KEY_BYTES))
+        return key
     }
 }
 
@@ -979,7 +1049,7 @@ private data class CredentialInfo(
     val v4: String,
 )
 
-private data class DHKeyPair(
+internal data class DHKeyPair(
     val publicKey: ByteArray,
     val privateKey: ByteArray,
 )
